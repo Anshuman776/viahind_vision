@@ -6,3 +6,17 @@ python-multipart>=0.0.9
 websockets>=12.0
 httpx>=0.27.0
 pytest>=8.2.0
+
+# Persistence, migrations and auth
+SQLAlchemy>=2.0.30
+alembic>=1.13
+PyJWT>=2.8
+bcrypt>=3.2
+cryptography>=42
+tzdata>=2023.3          # IANA timezones on Windows
+
+# Video and person detection (YOLO + ByteTrack, as in viahind-person-counter)
+numpy>=1.26
+opencv-python>=4.8
+ultralytics>=8.3        # model weights are NOT downloaded; set PERSON_MODEL_PATH
+lap>=0.5.12             # required by ByteTrack

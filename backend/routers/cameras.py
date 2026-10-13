@@ -1,161 +1,204 @@
-from fastapi import APIRouter, HTTPException, Response
-from typing import List
-from datetime import datetime
-try:
-    from ..models.camera import CameraStatusModel, PhoneCameraRegisterRequest
-except ImportError:
-    from models.camera import CameraStatusModel, PhoneCameraRegisterRequest
+"""
+Camera inventory, lifecycle and entrance-line configuration.
+
+Replaces the earlier in-memory list of hardcoded "online" cameras: cameras are now persisted,
+and their status comes from the running worker (Live only while frames actually arrive).
+Camera sources are write-only; responses only include a masked description.
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from auth import require_admin, require_operator
+from db import get_db, utcnow
+from models.entities import Camera, DetectionEvent, User
+from models.schemas import CameraCreate, CameraUpdate, LineUpdate
+from runtime import runtime
+from services.audit import record_audit
+from vision.camera_manager import line_from_camera
+from vision.sources import SourceError, decrypt_source, encrypt_source, mask_source, validate_source
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
-# In-memory storage of connected cameras (defaults + phone cameras)
-CONNECTED_CAMERAS: List[CameraStatusModel] = [
-    CameraStatusModel(
-        id="CAM-G-LOBBY-01",
-        name="Ground Reception Turnstile",
-        floor="Ground Floor",
-        location="Main Security Turnstile & Lobby",
-        status="online",
-        fps=30,
-        stream_type="rtsp",
-        is_phone_camera=False,
-        has_active_alert=True,
-    ),
-    CameraStatusModel(
-        id="CAM-G-DINING-02",
-        name="Ground Mess & Dining Hall",
-        floor="Ground Floor",
-        location="Resident Dining Facility",
-        status="online",
-        fps=30,
-        stream_type="rtsp",
-        is_phone_camera=False,
-    ),
-    CameraStatusModel(
-        id="CAM-F1-CORR-04",
-        name="Floor 1 Main Corridor East",
-        floor="Floor 1",
-        location="Boys Wing Corridor near Room 112",
-        status="online",
-        fps=30,
-        stream_type="rtsp",
-        is_phone_camera=False,
-        has_active_alert=True,
-    ),
-    CameraStatusModel(
-        id="CAM-F2-STAIR-02",
-        name="Floor 2 Emergency Fire Stair",
-        floor="Floor 2",
-        location="Emergency Fire Stairwell B",
-        status="online",
-        fps=30,
-        stream_type="rtsp",
-        is_phone_camera=False,
-        has_active_alert=True,
-    ),
-    CameraStatusModel(
-        id="CAM-F3-STUDY-01",
-        name="Floor 3 Common Study Lounge",
-        floor="Floor 3",
-        location="Central Reading & Work Hall",
-        status="online",
-        fps=30,
-        stream_type="rtsp",
-        is_phone_camera=False,
-        has_active_alert=True,
-    ),
-    CameraStatusModel(
-        id="CAM-F1-PHONE-01",
-        name="Floor 1 Phone Cam - East",
-        floor="Floor 1",
-        location="Boys Wing Corridor East",
-        status="online",
-        fps=30,
-        stream_type="browser_stream",
-        is_phone_camera=True,
-        stream_url="/ws/live/CAM-F1-PHONE-01",
-        has_active_alert=False,
-    ),
-    CameraStatusModel(
-        id="CAM-ROOF-PERIM-01",
-        name="Rooftop Terrace North Perimeter",
-        floor="Rooftop",
-        location="Water Tank & Solar Panel Terrace",
-        status="online",
-        fps=30,
-        stream_type="rtsp",
-        is_phone_camera=False,
-        has_active_alert=True,
-    ),
-]
 
-# Latest frame cache for phone camera feeds: camera_id -> base64/bytes
-LATEST_PHONE_FRAMES = {}
+def serialize_camera(cam: Camera) -> dict:
+    try:
+        source = decrypt_source(cam.source_secret) if cam.source_secret else None
+        source_description = mask_source(cam.source_type, source)
+    except SourceError as exc:
+        source_description = str(exc)
+    status = runtime.cameras.status(cam.id) if runtime.cameras else {"status": "stopped"}
+    return {
+        "id": cam.id,
+        "name": cam.name,
+        "location": cam.location,
+        "source_type": cam.source_type,
+        "source_description": source_description,
+        "source_configured": cam.source_type == "browser" or bool(cam.source_secret),
+        "enabled": cam.enabled,
+        "detection_enabled": cam.detection_enabled,
+        "desired_running": cam.desired_running,
+        "line": None
+        if not cam.has_line
+        else {"x1": cam.line_x1, "y1": cam.line_y1, "x2": cam.line_x2, "y2": cam.line_y2, "entry_side": cam.entry_side},
+        "runtime": status,
+    }
 
-@router.get("", response_model=List[CameraStatusModel])
-async def list_cameras():
-    """
-    Returns all registered cameras including live connected smartphones.
-    """
-    for cam in CONNECTED_CAMERAS:
-        if cam.id in LATEST_PHONE_FRAMES:
-            cam.live_frame_base64 = LATEST_PHONE_FRAMES[cam.id]
-    return CONNECTED_CAMERAS
+
+def _get_camera(db: Session, camera_id: str) -> Camera:
+    cam = db.get(Camera, camera_id)
+    if cam is None:
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    return cam
+
+
+@router.get("")
+def list_cameras(db: Session = Depends(get_db), _: User = Depends(require_operator)):
+    return [serialize_camera(c) for c in db.scalars(select(Camera).order_by(Camera.name))]
+
+
+@router.get("/{camera_id}")
+def get_camera(camera_id: str, db: Session = Depends(get_db), _: User = Depends(require_operator)):
+    return serialize_camera(_get_camera(db, camera_id))
+
+
+@router.post("", status_code=201)
+def create_camera(body: CameraCreate, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    if db.get(Camera, body.id) is not None:
+        raise HTTPException(status_code=409, detail="A camera with this ID already exists.")
+    try:
+        source = validate_source(body.source_type, body.source)
+    except SourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    cam = Camera(
+        id=body.id,
+        name=body.name,
+        location=body.location,
+        source_type=body.source_type,
+        source_secret=encrypt_source(source) if source else None,
+        detection_enabled=body.detection_enabled,
+    )
+    db.add(cam)
+    record_audit(db, admin, "camera.create", "camera", cam.id, {"name": cam.name, "source_type": cam.source_type})
+    db.commit()
+    return serialize_camera(cam)
+
+
+@router.patch("/{camera_id}")
+def update_camera(camera_id: str, body: CameraUpdate, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    cam = _get_camera(db, camera_id)
+    changes = {}
+    for field in ("name", "location", "enabled", "detection_enabled"):
+        value = getattr(body, field)
+        if value is not None and value != getattr(cam, field):
+            changes[field] = [getattr(cam, field), value]
+            setattr(cam, field, value.strip() if isinstance(value, str) else value)
+    new_type = body.source_type or cam.source_type
+    if body.source is not None or new_type != cam.source_type:
+        if body.source is None and new_type != "browser":
+            raise HTTPException(status_code=422, detail="Enter the camera source for the new camera type.")
+        try:
+            source = validate_source(new_type, body.source)
+        except SourceError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        cam.source_type = new_type
+        cam.source_secret = encrypt_source(source) if source else None
+        changes["source"] = "replaced"  # never log the source itself
+    cam.updated_at = utcnow()
+    if changes:
+        record_audit(db, admin, "camera.update", "camera", cam.id, changes)
+    db.commit()
+    restart = runtime.cameras and runtime.cameras.worker(cam.id) is not None
+    if restart and ("source" in changes or "detection_enabled" in changes or changes.get("enabled") == [True, False]):
+        if cam.enabled:
+            try:
+                runtime.cameras.start(cam.id)
+            except SourceError:
+                runtime.cameras.stop(cam.id)
+        else:
+            runtime.cameras.stop(cam.id)
+    return serialize_camera(cam)
+
+
+@router.delete("/{camera_id}", status_code=204)
+def delete_camera(camera_id: str, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    cam = _get_camera(db, camera_id)
+    events = db.scalar(select(func.count()).select_from(DetectionEvent).where(DetectionEvent.camera_id == camera_id))
+    if events:
+        raise HTTPException(status_code=409, detail="This camera has recorded events. Disable it instead of deleting it.")
+    if runtime.cameras:
+        runtime.cameras.stop(camera_id, persist=False)
+    record_audit(db, admin, "camera.delete", "camera", camera_id, {"name": cam.name})
+    db.delete(cam)
+    db.commit()
+    return Response(status_code=204)
+
+
+def _lifecycle(camera_id: str, db: Session, user: User, action: str) -> dict:
+    cam = _get_camera(db, camera_id)
+    try:
+        if action == "start":
+            runtime.cameras.start(camera_id)
+        elif action == "reconnect":
+            runtime.cameras.reconnect(camera_id)
+        else:
+            runtime.cameras.stop(camera_id)
+    except SourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    record_audit(db, user, f"camera.{action}", "camera", camera_id, {})
+    db.commit()
+    db.refresh(cam)
+    return serialize_camera(cam)
+
+
+@router.post("/{camera_id}/start")
+def start_camera(camera_id: str, db: Session = Depends(get_db), user: User = Depends(require_operator)):
+    return _lifecycle(camera_id, db, user, "start")
+
+
+@router.post("/{camera_id}/stop")
+def stop_camera(camera_id: str, db: Session = Depends(get_db), user: User = Depends(require_operator)):
+    return _lifecycle(camera_id, db, user, "stop")
+
+
+@router.post("/{camera_id}/reconnect")
+def reconnect_camera(camera_id: str, db: Session = Depends(get_db), user: User = Depends(require_operator)):
+    return _lifecycle(camera_id, db, user, "reconnect")
+
+
+@router.put("/{camera_id}/line")
+def set_line(camera_id: str, body: LineUpdate, db: Session = Depends(get_db), user: User = Depends(require_operator)):
+    cam = _get_camera(db, camera_id)
+    before = None if not cam.has_line else [cam.line_x1, cam.line_y1, cam.line_x2, cam.line_y2, cam.entry_side]
+    cam.line_x1, cam.line_y1, cam.line_x2, cam.line_y2 = body.x1, body.y1, body.x2, body.y2
+    cam.entry_side = body.entry_side
+    cam.updated_at = utcnow()
+    record_audit(db, user, "camera.line_update", "camera", cam.id, {"before": before, "after": [body.x1, body.y1, body.x2, body.y2, body.entry_side]})
+    db.commit()
+    if runtime.cameras:
+        runtime.cameras.update_line(cam.id, line_from_camera(cam))
+    return serialize_camera(cam)
+
+
+@router.delete("/{camera_id}/line")
+def clear_line(camera_id: str, db: Session = Depends(get_db), user: User = Depends(require_operator)):
+    cam = _get_camera(db, camera_id)
+    cam.line_x1 = cam.line_y1 = cam.line_x2 = cam.line_y2 = None
+    cam.updated_at = utcnow()
+    record_audit(db, user, "camera.line_clear", "camera", cam.id, {})
+    db.commit()
+    if runtime.cameras:
+        runtime.cameras.update_line(cam.id, None)
+    return serialize_camera(cam)
+
 
 @router.get("/{camera_id}/frame")
-async def get_camera_frame(camera_id: str):
-    """
-    Retrieve latest image frame snapshot from a smartphone stream.
-    """
-    if camera_id in LATEST_PHONE_FRAMES and LATEST_PHONE_FRAMES[camera_id]:
-        return {"camera_id": camera_id, "image": LATEST_PHONE_FRAMES[camera_id]}
-    raise HTTPException(status_code=404, detail="No frame cached for this camera")
-
-@router.post("/phone", response_model=CameraStatusModel)
-async def register_phone_camera(req: PhoneCameraRegisterRequest):
-    """
-    Register a smartphone camera as an active CCTV stream in VIAHIND Vision.
-    """
-    # Check if already registered, update if so
-    for cam in CONNECTED_CAMERAS:
-        if cam.id == req.id:
-            cam.name = req.name
-            cam.floor = req.floor
-            cam.location = req.location
-            cam.stream_type = req.stream_type
-            cam.stream_url = req.ip_stream_url
-            cam.status = "online"
-            cam.last_frame_timestamp = datetime.utcnow().isoformat()
-            return cam
-
-    # Register as new camera
-    new_cam = CameraStatusModel(
-        id=req.id,
-        name=req.name,
-        floor=req.floor,
-        location=req.location,
-        status="online",
-        fps=30,
-        stream_type=req.stream_type,
-        is_phone_camera=True,
-        stream_url=req.ip_stream_url or f"/ws/live/{req.id}",
-        last_frame_timestamp=datetime.utcnow().isoformat(),
-        has_active_alert=False,
-    )
-    # Put phone camera at the top of the list for high visibility
-    CONNECTED_CAMERAS.insert(0, new_cam)
-    return new_cam
-
-@router.delete("/phone/{camera_id}")
-async def disconnect_phone_camera(camera_id: str):
-    """
-    Disconnect a smartphone camera stream.
-    """
-    global CONNECTED_CAMERAS
-    initial_len = len(CONNECTED_CAMERAS)
-    CONNECTED_CAMERAS = [c for c in CONNECTED_CAMERAS if not (c.id == camera_id and c.is_phone_camera)]
-    if len(CONNECTED_CAMERAS) == initial_len:
-        raise HTTPException(status_code=404, detail="Phone camera not found")
-    if camera_id in LATEST_PHONE_FRAMES:
-        del LATEST_PHONE_FRAMES[camera_id]
-    return {"status": "disconnected", "camera_id": camera_id}
+def get_camera_frame(camera_id: str, db: Session = Depends(get_db), _: User = Depends(require_operator)):
+    """Latest frame received from a running camera (JPEG)."""
+    _get_camera(db, camera_id)
+    worker = runtime.cameras.worker(camera_id) if runtime.cameras else None
+    jpeg = worker.latest_jpeg() if worker is not None and worker.status == "live" else None
+    if jpeg is None:
+        raise HTTPException(status_code=404, detail="No live frame is available for this camera.")
+    return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
