@@ -25,6 +25,7 @@ import numpy as np
 
 from vision.line_crossing import CrossingEvent, CrossingParams, Detection, LineConfig, LineCrossingCounter
 from vision.quality import measure_quality
+from vision.static_filter import StaticObjectFilter
 from vision.zones import ZoneConfig, ZoneEvent, ZoneMonitor
 
 logger = logging.getLogger("viahind.camera")
@@ -115,6 +116,7 @@ class CameraWorker:
         clock: Callable[[], float] = time.time,
         zone_sink: Optional[ZoneSink] = None,
         evidence_policy: Optional[Callable[[], object]] = None,
+        static_object_seconds: float = 0.0,
     ):
         self.spec = spec
         self.params_provider = params_provider
@@ -141,6 +143,8 @@ class CameraWorker:
         params = params_provider()
         self.counter = LineCrossingCounter(spec.line, params)
         self.zones = ZoneMonitor(spec.zones, min_confidence=params.min_confidence, anchor=params.anchor)
+        # Drops "people" that never moved since they appeared (clothes, bags, posters); 0 disables.
+        self.static_filter = StaticObjectFilter(hold_seconds=static_object_seconds)
         self._pending_line: Optional[Tuple[Optional[LineConfig]]] = None
         self._pending_zones: Optional[Tuple[ZoneConfig, ...]] = None
         self.quality: Optional[dict] = None
@@ -340,7 +344,7 @@ class CameraWorker:
             detections: List[Detection] = []
             if detector is not None:
                 try:
-                    detections = detector.track(image)
+                    detections = self.static_filter.update(detector.track(image), ts, (w, h))
                     if self.detection_status == "error":
                         self._refresh_detection_status()
                 except Exception as exc:
@@ -436,6 +440,9 @@ class CameraWorker:
                 item["label"] = self._labels.get(item["track_id"])
                 overlay.append(item)
         for det in detections:
+            # Only show what the counter would trust; weaker guesses (down to the model floor) are not people.
+            if det.confidence < params.min_confidence:
+                continue
             if det.track_id is None or det.track_id not in live_ids:
                 overlay.append({"track_id": det.track_id, "box": [round(v, 1) for v in det.box], "side": "unknown", "last_event": None, "label": None})
         self._overlay = overlay
@@ -481,6 +488,7 @@ class CameraWorker:
             return
         dropped = self.counter.reset()
         self.zones.reset()
+        self.static_filter.reset()
         self._zone_counts = {}
         self._candidates.clear()
         self._labels.clear()

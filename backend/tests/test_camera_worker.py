@@ -371,3 +371,40 @@ def test_counting_disabled_camera_records_no_crossings(camera):
         assert line_from_camera(cam) is not None
         cam.counting_enabled = False
         assert line_from_camera(cam) is None
+
+
+class ClothesDetector:
+    """A real person walking, plus a static 'person' (clothes on a hanger) and a weak 0.2 guess."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def track(self, _frame):
+        self.calls += 1
+        x = 100 + 10 * self.calls
+        return [
+            Detection(1, (x, 200, x + 60, 320), 0.9),
+            Detection(2, (500, 100, 560, 260), 0.7),
+            Detection(3, (20, 20, 60, 120), 0.2),
+        ]
+
+    def reset(self):
+        pass
+
+
+def test_static_objects_and_weak_guesses_are_not_shown_or_counted_as_people(browser_spec):
+    worker = CameraWorker(browser_spec, params_provider=lambda: PARAMS, detector_factory=ClothesDetector, recorder=EventRecorder(),
+                          detection_max_fps=200, viewer_max_fps=50, static_object_seconds=0.3)
+    worker.start()
+    try:
+        stop = threading.Event()
+        feeder = threading.Thread(target=lambda: [push_frames(worker, 1) for _ in iter(stop.is_set, True)], daemon=True)
+        feeder.start()
+        try:
+            # Only the walking person remains: the clothes became static and the 0.2 guess is never drawn.
+            assert wait_for(lambda: {o["track_id"] for o in worker._overlay} == {1} and worker._visible_people == 1)
+            assert worker.static_filter.is_static(2, time.time())
+        finally:
+            stop.set()
+    finally:
+        worker.stop()

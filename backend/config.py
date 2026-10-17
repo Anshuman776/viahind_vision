@@ -80,6 +80,9 @@ class Settings:
     PERSON_TRACKER_CONFIG: str = os.getenv("PERSON_TRACKER_CONFIG", "bytetrack.yaml")
     DETECTION_MAX_FPS: float = float(os.getenv("DETECTION_MAX_FPS", "8"))
     DETECTION_DEVICE: str = os.getenv("DETECTION_DEVICE", "cpu")
+    # A detected "person" that has not moved at all since it appeared, for this many seconds, is treated
+    # as an object (clothes, bags, posters) and ignored. 0 disables the filter.
+    STATIC_OBJECT_SECONDS: float = float(os.getenv("STATIC_OBJECT_SECONDS", "10"))
     VIEWER_MAX_FPS: float = float(os.getenv("VIEWER_MAX_FPS", "8"))
     # Seconds without a frame before a live camera is reported as disconnected.
     CAMERA_STALE_SECONDS: float = float(os.getenv("CAMERA_STALE_SECONDS", "5"))

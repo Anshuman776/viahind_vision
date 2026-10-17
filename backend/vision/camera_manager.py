@@ -165,6 +165,7 @@ class CameraManager:
                 monitoring_established=was_monitoring,
                 zone_sink=self.zone_sink,
                 evidence_policy=policy,
+                static_object_seconds=settings.STATIC_OBJECT_SECONDS,
             )
             self._workers[camera_id] = worker
             worker.start()
