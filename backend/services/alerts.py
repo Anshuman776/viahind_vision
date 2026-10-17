@@ -30,6 +30,9 @@ SEVERITY_RANK = {s: i for i, s in enumerate(ALERT_SEVERITIES)}
 
 # Called after commit with (organization_id, serialized alert, notify) — set by main.py.
 on_alert_changed: Optional[Callable[[int, dict, bool], None]] = None
+# Head guard hook (services/head_guard.on_report), set by main.py: (db, alert, created, notify) -> handled.
+# When it returns True the head guard owns owner notifications for this alert (one message per incident).
+report_hook: Optional[Callable[[Session, "Alert", bool, bool], bool]] = None
 
 
 @dataclass
@@ -129,7 +132,10 @@ def raise_alert(db: Session, draft: AlertDraft, cooldown_seconds: int) -> AlertO
 def publish(db: Session, outcome: AlertOutcome) -> None:
     """After commit: queue notifications and push to signed-in users of the organization."""
     alert = outcome.alert
-    if outcome.notify:
+    handled = False
+    if report_hook is not None:
+        handled = report_hook(db, alert, outcome.created, outcome.notify)
+    if outcome.notify and not handled:
         from services.notifications import queue_alert_notifications
 
         try:

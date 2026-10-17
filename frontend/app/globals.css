@@ -457,3 +457,26 @@ dialog.dialog::backdrop { background: rgba(20, 22, 26, 0.35); }
   .site-hero { padding: 40px 0; }
   .site-section { padding: 48px 0; }
 }
+
+/* ---------- Guard room ---------- */
+.guard-grid { list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; padding: 14px; }
+.guard-card { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 12px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.guard-card-head { display: flex; align-items: flex-start; gap: 8px; }
+.guard-card-head > svg { color: var(--primary); margin-top: 2px; flex-shrink: 0; }
+.guard-name { font-weight: 650; overflow-wrap: anywhere; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 4px; }
+.incident-list { list-style: none; }
+.incident-card { padding: 12px 16px; border-bottom: 1px solid var(--border); display: grid; gap: 4px; }
+.incident-card:last-child { border-bottom: none; }
+.incident-card.focused { background: var(--surface-muted); box-shadow: inset 3px 0 0 var(--primary); }
+.incident-card.resolved { opacity: 0.7; }
+.incident-head { display: flex; align-items: center; gap: 8px; }
+.incident-title { flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 0; font: inherit; font-weight: 650; color: var(--text); cursor: pointer; overflow-wrap: anywhere; }
+.incident-title:hover { text-decoration: underline; }
+.incident-body { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 12px; margin-top: 8px; }
+.incident-body:not(:has(.incident-snap)) { grid-template-columns: minmax(0, 1fr); }
+.incident-snap { width: 160px; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 6px; background: #15181c; }
+@media (max-width: 560px) {
+  .incident-body { grid-template-columns: minmax(0, 1fr); }
+  .incident-snap { width: 100%; aspect-ratio: 4 / 3; }
+}

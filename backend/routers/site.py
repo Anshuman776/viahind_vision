@@ -12,6 +12,7 @@ from models.schemas import SiteSettingsUpdate
 from runtime import runtime
 from services.audit import record_audit, serialize_audit
 from services.evidence import invalidate
+from services.mail_server import is_configured as mail_configured
 from services.retention import run_retention
 from services.site_settings import get_site_settings
 from services.snapshots import organization_usage_bytes, storage_status
@@ -49,7 +50,7 @@ def get_settings(db: Session = Depends(get_db), user: User = Depends(get_current
             "storage": {**storage_status(), "evidence_used_mb": round(organization_usage_bytes(user.organization_id) / (1024 * 1024), 1)},
             "file_sources_allowed": settings.ALLOW_FILE_SOURCES,
             "test_video_dir": settings.TEST_VIDEO_DIR.name,
-            "email_configured": bool(settings.SMTP_HOST and settings.SMTP_FROM),
+            "email_configured": mail_configured(db, user.organization_id),
             "camera_allowed_networks": settings.CAMERA_ALLOWED_NETWORKS,
         })
     else:

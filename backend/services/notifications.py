@@ -18,11 +18,9 @@ import hmac
 import json
 import logging
 import re
-import smtplib
-import ssl
+import smtplib  # noqa: F401  (kept so tests can replace smtplib.SMTP)
 import threading
 from datetime import timedelta
-from email.message import EmailMessage
 from typing import Callable, List, Optional
 from urllib.parse import urlsplit
 
@@ -236,22 +234,18 @@ def _format_text(subject: str, payload: dict) -> str:
     return "\n".join(lines)
 
 
-def send_email(recipients: List[str], subject: str, body: str, image: Optional[bytes] = None) -> None:
-    if not settings.SMTP_HOST or not settings.SMTP_FROM:
-        raise ChannelError("Email is not configured on the server (SMTP_HOST / SMTP_FROM).")
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = settings.SMTP_FROM
-    msg["To"] = ", ".join(recipients)
-    msg.set_content(body)
-    if image:
-        msg.add_attachment(image, maintype="image", subtype="jpeg", filename="evidence.jpg")
-    with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as smtp:
-        if settings.SMTP_STARTTLS:
-            smtp.starttls(context=ssl.create_default_context())
-        if settings.SMTP_USERNAME:
-            smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-        smtp.send_message(msg)
+def send_email(recipients: List[str], subject: str, body: str, image: Optional[bytes] = None,
+               organization_id: Optional[int] = None) -> None:
+    """Send with the organization's mail server (Settings → Notifications), else the SMTP_* settings."""
+    from services.mail_server import MailError, effective_config, send
+
+    cfg = effective_config(organization_id)
+    if cfg is None:
+        raise ChannelError("No mail server is configured. Add one under Settings → Notifications → Mail server.")
+    try:
+        send(cfg, recipients, subject, body, image)
+    except MailError as exc:
+        raise ChannelError(str(exc)) from None
 
 
 def sign(secret: str, body: bytes) -> str:
@@ -334,7 +328,7 @@ def deliver(delivery: NotificationDelivery, channel: NotificationChannel) -> Non
     payload = json.loads(delivery.payload or "{}")
     image = _snapshot_for(delivery) if config.get("attach_snapshot") and channel.kind in ("email", "telegram") else None
     if channel.kind == "email":
-        send_email(config["recipients"], delivery.subject, _format_text(delivery.subject, payload), image)
+        send_email(config["recipients"], delivery.subject, _format_text(delivery.subject, payload), image, channel.organization_id)
     elif channel.kind == "telegram":
         send_telegram(config["bot_token"], config["chat_id"], _telegram_text(delivery.subject, payload), image)
     elif channel.kind == "webhook":
@@ -374,7 +368,7 @@ def process_pending(limit: int = 50, sender: Optional[Callable] = None) -> int:
             if channel is None or not channel.enabled:
                 delivery.status, delivery.last_error = "suppressed", "Channel disabled or removed."
                 continue
-            if delivery.kind == "alert" and _sent_last_hour(db, channel.id) >= channel.rate_limit_per_hour:
+            if delivery.kind in ("alert", "incident") and _sent_last_hour(db, channel.id) >= channel.rate_limit_per_hour:
                 delivery.status, delivery.last_error = "suppressed", "Channel rate limit reached; see the Alerts page."
                 continue
             delivery.attempts += 1

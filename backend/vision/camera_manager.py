@@ -10,6 +10,7 @@ from sqlalchemy import select
 from config import settings
 from db import session_scope
 from models.entities import Camera, CameraZone
+from services.guards import watches_fights
 from services.incidents import close_incidents, open_incident, record_camera_error
 from services.site_settings import crossing_params, get_site_settings
 from vision.camera_worker import CameraSpec, CameraWorker
@@ -131,6 +132,7 @@ class CameraManager:
                 organization_id=cam.organization_id,
                 location_id=cam.location_id,
                 zones=zones_for_camera(db, cam.id),
+                fight_watch=watches_fights(cam),
             )
             if persist:
                 cam.desired_running = True
@@ -246,6 +248,15 @@ class CameraManager:
         with session_scope() as db:
             zones = zones_for_camera(db, camera_id)
         worker.update_zones(zones)
+
+    def set_fight_watch(self, camera_id: str, enabled: bool) -> None:
+        """Apply a guard duty change without restarting the camera (no counting gap)."""
+        worker = self._workers.get(camera_id)
+        if worker is None or worker.spec.fight_watch == enabled:
+            return
+        worker.spec.fight_watch = enabled
+        if not enabled and self.anomaly is not None:
+            self.anomaly.forget_camera(camera_id)
 
     def workers(self) -> List[CameraWorker]:
         return list(self._workers.values())

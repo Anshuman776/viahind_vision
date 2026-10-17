@@ -117,6 +117,10 @@ class SiteSettings(Base):
     snapshot_storage_limit_mb: Mapped[int] = mapped_column(Integer, nullable=False, default=2048)
     # Closed alerts older than this are deleted (0 keeps them).
     alert_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=180)
+    # Outgoing mail server (SMTP) set from the console, encrypted. Null falls back to the SMTP_* settings.
+    mail_config_secret: Mapped[Optional[str]] = mapped_column(Text)
+    # Head guard policy as JSON (see services/head_guard.py). Null uses the defaults.
+    head_guard_config: Mapped[Optional[str]] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utcnow)
 
 
@@ -145,6 +149,11 @@ class Camera(Base):
     entry_side: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # Whether this camera's line contributes to footfall/occupancy (one counting camera per doorway).
     counting_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Guard assignment (services/guards.py): the post this camera watches and the duties it performs.
+    # A null post means "general watch"; null duties mean the post's default duties.
+    guard_name: Mapped[str] = mapped_column(String(60), nullable=False, default="")
+    guard_post: Mapped[Optional[str]] = mapped_column(String(24))
+    guard_duties: Mapped[Optional[str]] = mapped_column(Text)
     last_error: Mapped[Optional[str]] = mapped_column(Text)
     last_error_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utcnow)
@@ -499,3 +508,40 @@ class SyncNode(Base):
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime)
     last_batch_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utcnow)
+
+
+GUARD_INCIDENT_STATUSES = ("open", "acknowledged", "resolved")
+
+
+class GuardIncident(Base):
+    """A situation tracked by the head guard: one or more related guard reports (alerts) that
+    happened close together at one location. Incidents are for human follow-up, not proof."""
+
+    __tablename__ = "guard_incidents"
+    __table_args__ = (Index("ix_guard_incidents_org_status", "organization_id", "status", "last_seen_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    organization_id: Mapped[int] = _org_fk(index=False)
+    location_id: Mapped[Optional[int]] = mapped_column(ForeignKey("locations.id", ondelete="SET NULL"))
+    # security: reports about people (fights, restricted areas, curfew...). system: cameras that cannot see.
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="security")
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # JSON lists
+    actions: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    camera_ids: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    alert_ids: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    report_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    escalated_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime)
+    escalated_severity: Mapped[Optional[str]] = mapped_column(String(16))
+    acknowledged_by: Mapped[Optional[str]] = mapped_column(String(64))
+    acknowledged_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(64))
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime)
+    resolution_note: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utcnow)

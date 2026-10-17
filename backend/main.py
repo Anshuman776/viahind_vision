@@ -19,10 +19,10 @@ from config import BASE_DIR, settings
 from db import SessionLocal
 from models.entities import Camera
 from routers import (
-    alert_config, alerts, anomaly, auth as auth_router, cameras, events, locations, ml, overview, reports, site, sync, users, visits,
+    alert_config, alerts, anomaly, auth as auth_router, cameras, events, guards, locations, ml, overview, reports, site, sync, users, visits,
 )
 from runtime import runtime
-from services import alerts as alert_service
+from services import alerts as alert_service, head_guard
 from services.alert_engine import AlertEngine, on_event_recorded, on_video_anomaly, on_zone_event
 from services.anomaly_store import store_anomaly
 from services.events import EventRecorder
@@ -78,6 +78,7 @@ async def lifespan(app: FastAPI):
         ensure_bootstrap_admin(db)
     manager.bind_loop(asyncio.get_running_loop())
     alert_service.on_alert_changed = _on_alert_changed
+    alert_service.report_hook = head_guard.on_report
 
     runtime.recorder = EventRecorder(on_recorded=_on_event_recorded)
     runtime.recorder.start_retry_loop()
@@ -106,6 +107,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        alert_service.report_hook = None
         runtime.cameras.shutdown()
         runtime.anomaly.shutdown()
         runtime.recorder.stop()
@@ -187,7 +189,7 @@ async def security_and_limits(request: Request, call_next):
     return response
 
 
-for r in (auth_router, users, cameras, events, visits, overview, site, anomaly, alerts, locations, alert_config, reports, ml, sync):
+for r in (auth_router, users, cameras, events, visits, overview, site, anomaly, alerts, locations, alert_config, reports, ml, sync, guards):
     app.include_router(r.router, prefix=settings.API_V1_PREFIX)
 
 

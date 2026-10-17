@@ -176,6 +176,32 @@ Rules (Settings → Alert rules; enable/disable, severity, parameters, re-notifi
 
 **Notifications** (Settings → Notifications): in-app is always on (real-time badge and Alerts page). Telegram (bot messages, optionally with the evidence photo), email (SMTP, optionally with the photo attached) and webhooks per organization; a single-business install can also set `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `ALERT_EMAIL_TO` in `.env`. Each channel has a minimum severity, optional categories, an hourly rate limit (excess = *suppressed*), retries with backoff (5 attempts) and a delivery log. Webhooks are signed: `X-VV-Signature: sha256=<HMAC-SHA256 of the body with the channel secret>`. Bot tokens, channel secrets and recipients are encrypted at rest and never returned. Images go out only on channels where an administrator ticked *Attach the evidence snapshot*; webhooks never carry images.
 
+**Mail server** (Settings → Mail server): the SMTP account that sends emails (Gmail / Outlook / Zoho presets, STARTTLS or SSL/TLS, *Send test*). It is stored encrypted per organization and the password is never returned. Without it, the `SMTP_*` values in `.env` are used.
+
+### Guard Room: camera guards and the head guard
+
+Every camera is a **guard** at a **post** (main gate, entrance, corridor, common room, restricted area, perimeter, general) with **duties**:
+
+| Duty | Alert rules it reports | Needs on the camera |
+|---|---|---|
+| Gate entry / exit log | repeated crossings | counting line |
+| Curfew / after-hours watch | after hours | counting line + location hours |
+| Crowding & headcount | traffic frequency, occupancy | counting line |
+| Fight / altercation watch | video anomaly model (the model only analyses cameras with this duty) | video anomaly detector |
+| Restricted area watch | restricted zone | a restricted zone |
+| Loitering watch | zone dwell | a monitored zone |
+
+A guard only reports its own duties. Camera offline, obstructed view and processing problems are always reported. A camera without a post keeps every duty, so existing setups behave as before.
+
+The **head guard** (`services/head_guard.py`) receives every report and:
+- groups reports at one location within *N* minutes (default 10) into one **incident**, and raises the severity one level when a second guard reports it;
+- writes what the guards saw and **what to do next** (playbooks per report type: fight, restricted area, curfew, camera offline…);
+- sends the owner **one message per incident** (when it starts, gets worse or another guard confirms it), not one per alert, through the notification channels. The evidence photo is attached when the channel allows it;
+- closes quiet incidents automatically once all their reports are closed, and can send a **daily briefing** (gate log, incidents, reports per guard) at a chosen hour;
+- keeps a **what to do next** list: cameras that cannot see or are off duty, missing counting lines and zones, curfew hours not set, no owner channel, no mail server.
+
+One server runs up to `MAX_SIMULTANEOUS_STREAMS` cameras (default 16). Turn the head guard off in the Guard Room to go back to one notification per alert.
+
 ---
 
 ## 7. Unusual-pattern detection (Isolation Forest)

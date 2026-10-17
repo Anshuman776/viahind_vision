@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { BarChart3, Bell, Images, LayoutDashboard, LogOut, ScanEye, ScrollText, Settings, Video, Wifi, WifiOff } from 'lucide-react';
+import { BarChart3, Bell, Images, LayoutDashboard, LogOut, ScanEye, ScrollText, Settings, ShieldCheck, Video, Wifi, WifiOff } from 'lucide-react';
 import { useSession } from './SessionProvider';
 import { useSystem } from './SystemProvider';
 import { formatDate, formatTime } from '@/lib/format';
@@ -19,6 +19,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { href: '/overview', label: 'Overview', icon: LayoutDashboard },
   { href: '/live', label: 'Live Cameras', icon: Video, operatorOnly: true },
+  { href: '/guards', label: 'Guard Room', icon: ShieldCheck, operatorOnly: true },
   { href: '/alerts', label: 'Alerts', icon: Bell, operatorOnly: true, badge: 'alerts' },
   { href: '/logs', label: 'Entry & Exit Logs', icon: ScrollText, operatorOnly: true },
   { href: '/evidence', label: 'Event Evidence', icon: Images, operatorOnly: true },

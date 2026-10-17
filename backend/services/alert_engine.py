@@ -27,6 +27,7 @@ from services.alert_rules import RULES, EffectiveRule, effective_rules
 from services.alerts import AlertDraft, auto_resolve, publish, raise_alert
 from services.business_hours import is_open, parse_hours
 from services.evidence import evidence_policy
+from services.guards import guard_allows
 from services.occupancy import compute_location_occupancy, occupancy_changes
 from services.site_settings import get_site_settings, site_zone
 from services.snapshots import save_snapshot
@@ -57,6 +58,8 @@ def invalidate_rules(organization_id: int) -> None:
 
 
 def _emit(draft: AlertDraft, rule: EffectiveRule) -> Optional[str]:
+    if not guard_allows(draft.organization_id, draft.camera_id, draft.rule_type):
+        return None  # not this guard's duty (services/guards.py)
     with session_scope() as db:
         outcome = raise_alert(db, draft, rule.cooldown_seconds)
         db.flush()
@@ -201,7 +204,7 @@ def _evaluate_zone_event(spec, session_id: str, ev, jpeg: Optional[bytes]) -> No
     org_id = spec.organization_id
     rules = rules_for(org_id)
     rule = rules["restricted_zone" if ev.kind == "zone_entered" else "zone_dwell"]
-    if not rule.enabled:
+    if not rule.enabled or not guard_allows(org_id, spec.id, rule.rule_type):
         return
     occurred = datetime.fromtimestamp(ev.occurred_at, tz=timezone.utc)
     with session_scope() as db:
@@ -235,7 +238,7 @@ def on_video_anomaly(stored: Optional[dict], jpeg: Optional[bytes] = None) -> No
     try:
         org_id = stored["organization_id"]
         rule = rules_for(org_id)["video_anomaly_model"]
-        if not rule.enabled:
+        if not rule.enabled or not guard_allows(org_id, stored.get("camera_id"), rule.rule_type):
             return
         with session_scope() as db:
             cam = db.get(Camera, stored["camera_id"]) if stored.get("camera_id") else None
@@ -307,7 +310,7 @@ class AlertEngine:
     def run_once(self) -> None:
         if not settings.ALERTS_ENABLED:
             return
-        for step in (self.check_camera_offline, self.check_camera_quality, self.check_processing, self.run_hourly_jobs):
+        for step in (self.check_camera_offline, self.check_camera_quality, self.check_processing, self.run_hourly_jobs, self.head_guard_tick):
             try:
                 step()
             except SQLAlchemyError:
@@ -449,6 +452,12 @@ class AlertEngine:
                     "check the internet connection and SYNC_URL.",
                     oldest, title="Cloud synchronisation delayed", metrics={"pending": n, "oldest_minutes": int(delay)},
                 ), rule)
+
+    # head guard: auto-resolve quiet incidents, daily briefing ---------------------------------
+    def head_guard_tick(self) -> None:
+        from services.head_guard import tick
+
+        tick()
 
     # hourly jobs: ML inference and scheduled reports ---------------------------------------------
     def run_hourly_jobs(self) -> None:

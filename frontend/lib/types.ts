@@ -420,3 +420,96 @@ export interface Freshness {
   deployment_mode: string;
   sync: { pending: number; last_sent_at: string | null; oldest_pending_at: string | null; last_error: string | null } | null;
 }
+
+// -- Guard room ------------------------------------------------------------------------------------
+
+export type GuardState = 'on_duty' | 'reporting_in' | 'off_duty' | 'unreachable' | 'disabled';
+
+export interface Guard {
+  camera_id: string;
+  camera_name: string;
+  position: string;
+  location_id: number;
+  guard_name: string;
+  custom_name: string;
+  post: string;
+  post_label: string;
+  duties: string[];
+  custom_duties: boolean;
+  state: GuardState;
+  status_message: string;
+  tracked_people: number;
+  fps: number;
+  detection_status: string;
+  reports_today: number;
+  last_report: { title: string; severity: Severity; at: string } | null;
+  has_line: boolean;
+}
+
+export interface GuardIncident {
+  id: string;
+  kind: 'security' | 'system';
+  title: string;
+  severity: Severity;
+  status: 'open' | 'acknowledged' | 'resolved';
+  summary: string;
+  actions: string[];
+  location_id: number | null;
+  location_name: string | null;
+  guards: { camera_id: string; camera_name: string; guard_name: string }[];
+  alert_ids: string[];
+  snapshot_alert_id: string | null;
+  report_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  escalated_at: string | null;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  resolution_note: string | null;
+}
+
+export interface HeadGuardConfig {
+  enabled: boolean;
+  correlation_minutes: number;
+  corroboration_boost: boolean;
+  briefing_enabled: boolean;
+  briefing_hour: number;
+  auto_resolve_minutes: number;
+  last_briefing?: string | null;
+}
+
+export interface Recommendation {
+  priority: 'urgent' | 'high' | 'medium' | 'low';
+  text: string;
+  link: string;
+}
+
+export interface GuardRoom {
+  summary: string;
+  head_guard: HeadGuardConfig;
+  guards: Guard[];
+  incidents: GuardIncident[];
+  recommendations: Recommendation[];
+  capacity: { max_cameras_per_server: number; running: number; video_model_enabled: boolean; person_detector: boolean };
+}
+
+export interface GuardCatalogue {
+  posts: { key: string; label: string; description: string; duties: string[] }[];
+  duties: { key: string; label: string; description: string; needs: string }[];
+}
+
+export interface MailServer {
+  configured: boolean;
+  source: 'console' | 'environment' | null;
+  host: string;
+  port: number;
+  security: 'starttls' | 'ssl' | 'none';
+  username: string;
+  has_password: boolean;
+  from_address: string;
+  from_name: string;
+  error: string | null;
+  presets: Record<string, { host: string; port: number; security: 'starttls' | 'ssl' | 'none'; hint: string }>;
+}

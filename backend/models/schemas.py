@@ -273,3 +273,45 @@ class UserUpdate(BaseModel):
     email: Optional[str] = Field(default=None, max_length=254, pattern=r"^([^@\s]+@[^@\s]+\.[^@\s]+)?$")
     is_active: Optional[bool] = None
     password: Optional[str] = Field(default=None, min_length=10, max_length=256)
+
+
+class GuardAssignment(BaseModel):
+    guard_name: Optional[str] = Field(default=None, max_length=60)
+    post: Optional[str] = Field(default=None, max_length=24)
+    duties: Optional[List[str]] = Field(default=None, max_length=16)
+    # True: use the post's default duties again.
+    reset_duties: bool = False
+
+
+class GuardPresetBody(BaseModel):
+    """Assign one post to many cameras at once, e.g. after adding 16 cameras."""
+    assignments: Dict[str, str] = Field(max_length=64)  # camera_id -> post
+
+
+class HeadGuardConfigUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    correlation_minutes: Optional[int] = None
+    corroboration_boost: Optional[bool] = None
+    briefing_enabled: Optional[bool] = None
+    briefing_hour: Optional[int] = None
+    auto_resolve_minutes: Optional[int] = None
+
+
+class IncidentAction(BaseModel):
+    action: Literal["acknowledge", "resolve"]
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class MailServerBody(BaseModel):
+    host: str = Field(min_length=3, max_length=253)
+    port: int = Field(ge=1, le=65535)
+    security: Literal["starttls", "ssl", "none"] = "starttls"
+    username: str = Field(default="", max_length=254)
+    # None keeps the stored password; "" clears it.
+    password: Optional[str] = Field(default=None, max_length=512)
+    from_address: str = Field(min_length=3, max_length=254)
+    from_name: str = Field(default="", max_length=80)
+
+
+class MailTestBody(BaseModel):
+    to: str = Field(min_length=3, max_length=254)

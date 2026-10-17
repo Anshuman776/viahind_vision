@@ -44,6 +44,8 @@ class CameraSpec:
     organization_id: Optional[int] = None
     location_id: Optional[int] = None
     zones: Tuple[ZoneConfig, ...] = ()
+    # Whether this camera's guard has the fight duty (feeds the video anomaly model).
+    fight_watch: bool = True
 
 
 class Publisher(Protocol):
@@ -345,7 +347,7 @@ class CameraWorker:
                     self._set_detection("error", f"Detection failed on a frame: {type(exc).__name__}")
                     logger.exception("Detection failed on camera %s", self.spec.id)
                     continue
-            if self.anomaly is not None:
+            if self.anomaly is not None and self.spec.fight_watch:
                 # People boxes let the motion detector look only at people in close contact.
                 min_conf = self.counter.params.min_confidence
                 people = [d.box for d in detections if d.track_id is not None and d.confidence >= min_conf] if detector is not None else None

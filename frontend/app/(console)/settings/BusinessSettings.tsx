@@ -1,10 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { BrainCircuit, Plus, Send, Trash2 } from 'lucide-react';
+import { BrainCircuit, Mail, Plus, Send, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { CATEGORY_LABELS, formatDateTime, SEVERITY_LABELS } from '@/lib/format';
-import type { AlertRule, BusinessHours, Channel, DayKey, Delivery, Location, ModelStatus, ReportSchedule, Severity, SiteSettings } from '@/lib/types';
+import type { AlertRule, BusinessHours, Channel, DayKey, Delivery, Location, MailServer, ModelStatus, ReportSchedule, Severity, SiteSettings } from '@/lib/types';
 import { useSystem } from '@/components/SystemProvider';
 import { Dialog } from '@/components/Dialog';
 import { SeverityBadge } from '@/components/AlertBadges';
@@ -441,7 +441,7 @@ export function NotificationsSection({ emailConfigured }: { emailConfigured: boo
       <p className="small muted" style={{ marginBottom: 12 }}>
         Every alert appears in the app in real time. Channels below also deliver alerts at or above their minimum severity,
         with retries and an hourly limit. Snapshots are attached only when a channel opts in; webhooks never carry images.
-        {!emailConfigured && ' Email needs SMTP_HOST and SMTP_FROM on the server.'}
+        {!emailConfigured && ' Email channels need a mail server: set it up in the Mail server section below.'}
       </p>
       <ErrorBanner error={error} />
       {channels.length === 0 ? (
@@ -599,6 +599,150 @@ export function NotificationsSection({ emailConfigured }: { emailConfigured: boo
         </div>
         <ErrorBanner error={error} />
       </Dialog>
+    </Section>
+  );
+}
+
+// -- Mail server ------------------------------------------------------------------------------------
+
+export function MailServerSection({ onSaved }: { onSaved?: () => void }) {
+  const [data, setData] = useState<MailServer | null>(null);
+  const [form, setForm] = useState({ host: '', port: 587, security: 'starttls' as MailServer['security'], username: '', password: '', from_address: '', from_name: '' });
+  const [testTo, setTestTo] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+  const { busy, error, setError, run } = useAsync();
+
+  const apply = useCallback((d: MailServer) => {
+    setData(d);
+    setForm({ host: d.host, port: d.port, security: d.security, username: d.username, password: '', from_address: d.from_address, from_name: d.from_name });
+  }, []);
+  const load = useCallback(async () => {
+    try {
+      apply(await api<MailServer>('/mail-server'));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }, [apply, setError]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const preset = (key: string) => {
+    const p = data?.presets[key];
+    if (!p) return;
+    setForm({ ...form, host: p.host || form.host, port: p.port, security: p.security });
+    setNotice(p.hint || null);
+  };
+  const save = () =>
+    run(
+      async () => {
+        const body = { ...form, password: form.password ? form.password : null };
+        apply(await api<MailServer>('/mail-server', { method: 'PUT', body }));
+        setNotice('Mail server saved. Send a test email to check it.');
+      },
+      onSaved,
+    );
+  const test = () =>
+    run(async () => {
+      const r = await api<{ via: string }>('/mail-server/test', { method: 'POST', body: { to: testTo } });
+      setNotice(`Test email sent via ${r.via}. Check the inbox (and spam folder) of ${testTo}.`);
+    });
+  const remove = () =>
+    window.confirm('Remove the mail server settings? Email channels will stop until a new one is set.') &&
+    run(async () => {
+      await api('/mail-server', { method: 'DELETE' });
+      setNotice(null);
+      await load();
+    }, onSaved);
+
+  const presetLabel = (k: string) => (k === 'gmail' ? 'Gmail' : k === 'outlook' ? 'Outlook / Microsoft 365' : k === 'zoho' ? 'Zoho' : 'Other');
+
+  return (
+    <Section id="mail-server" title="Mail server" description="the account that sends alert and briefing emails">
+      <p className="small muted" style={{ marginBottom: 12 }}>
+        {data?.source === 'environment'
+          ? 'Currently using the SMTP settings from the server environment (.env). Saving here overrides them for your organization.'
+          : data?.configured
+            ? 'Emails are sent through the account below. The password is stored encrypted and never shown again.'
+            : 'No mail server yet. For Gmail, turn on 2-Step Verification and create an App Password, then choose the Gmail preset.'}
+      </p>
+      {data?.error && <ErrorBanner error={data.error} />}
+      <div className="segmented" role="group" aria-label="Provider preset" style={{ marginBottom: 12 }}>
+        {Object.keys(data?.presets ?? {}).map((k) => (
+          <button key={k} type="button" aria-pressed={k !== 'custom' && form.host === data?.presets[k].host} onClick={() => preset(k)}>
+            {presetLabel(k)}
+          </button>
+        ))}
+      </div>
+      <div className="form-grid">
+        <div className="field">
+          <label htmlFor="mail-host">SMTP host</label>
+          <input id="mail-host" className="input mono" value={form.host} placeholder="smtp.gmail.com" onChange={(e) => setForm({ ...form, host: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="mail-port">Port</label>
+          <input id="mail-port" className="input" type="number" min={1} max={65535} value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} />
+        </div>
+        <div className="field">
+          <label htmlFor="mail-sec">Security</label>
+          <select id="mail-sec" className="select" value={form.security} onChange={(e) => setForm({ ...form, security: e.target.value as MailServer['security'] })}>
+            <option value="starttls">STARTTLS (port 587)</option>
+            <option value="ssl">SSL/TLS (port 465)</option>
+            <option value="none">None (local relay only)</option>
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="mail-user">Username</label>
+          <input id="mail-user" className="input" autoComplete="off" value={form.username} placeholder="you@gmail.com" onChange={(e) => setForm({ ...form, username: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="mail-pass">Password / App Password</label>
+          <input
+            id="mail-pass"
+            className="input"
+            type="password"
+            autoComplete="new-password"
+            value={form.password}
+            placeholder={data?.has_password ? '•••••••• (unchanged)' : ''}
+            onChange={(e) => setForm({ ...form, password: e.target.value })}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="mail-from">Send from (address)</label>
+          <input id="mail-from" className="input" value={form.from_address} placeholder="you@gmail.com" onChange={(e) => setForm({ ...form, from_address: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="mail-name">Sender name</label>
+          <input id="mail-name" className="input" maxLength={80} value={form.from_name} placeholder="Sunrise PG Security" onChange={(e) => setForm({ ...form, from_name: e.target.value })} />
+        </div>
+      </div>
+      {notice && (
+        <div className="banner banner-info" role="status" style={{ margin: '12px 0' }}>
+          {notice}
+        </div>
+      )}
+      <ErrorBanner error={error} />
+      <div className="form-actions">
+        <button type="button" className="btn btn-primary" onClick={save} disabled={busy || !form.host.trim() || !form.from_address.trim()}>
+          <Mail size={14} /> Save mail server
+        </button>
+        {data?.source === 'console' && (
+          <button type="button" className="btn btn-danger" onClick={remove} disabled={busy}>
+            Remove
+          </button>
+        )}
+      </div>
+      {data?.configured && (
+        <div className="form-actions" style={{ alignItems: 'flex-end' }}>
+          <div className="field" style={{ flex: 1, maxWidth: 320, marginBottom: 0 }}>
+            <label htmlFor="mail-test">Send a test email to</label>
+            <input id="mail-test" className="input" value={testTo} placeholder="owner@example.com" onChange={(e) => setTestTo(e.target.value)} />
+          </div>
+          <button type="button" className="btn" onClick={test} disabled={busy || !testTo.includes('@')}>
+            <Send size={14} /> Send test
+          </button>
+        </div>
+      )}
     </Section>
   );
 }

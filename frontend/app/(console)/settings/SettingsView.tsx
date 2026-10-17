@@ -9,7 +9,7 @@ import { useSession } from '@/components/SessionProvider';
 import { useSystem } from '@/components/SystemProvider';
 import { CameraStatusBadge } from '@/components/Status';
 import { Dialog } from '@/components/Dialog';
-import { AlertRulesSection, AnomalyModelSection, EvidenceSection, LocationsSection, NotificationsSection, SchedulesSection, VideoAnomalySection } from './BusinessSettings';
+import { AlertRulesSection, AnomalyModelSection, EvidenceSection, LocationsSection, MailServerSection, NotificationsSection, SchedulesSection, VideoAnomalySection } from './BusinessSettings';
 
 const SECTIONS: [string, string, 'all' | 'admin'][] = [
   ['site', 'Business', 'all'],
@@ -20,6 +20,7 @@ const SECTIONS: [string, string, 'all' | 'admin'][] = [
   ['retention', 'Data retention', 'all'],
   ['alert-rules', 'Alert rules', 'admin'],
   ['notifications', 'Notifications', 'admin'],
+  ['mail-server', 'Mail server', 'admin'],
   ['schedules', 'Scheduled reports', 'admin'],
   ['anomaly-model', 'Unusual patterns (ML)', 'admin'],
   ['video-anomaly', 'Video anomaly detection', 'admin'],
@@ -62,6 +63,7 @@ export default function SettingsView() {
             <>
               <AlertRulesSection />
               <NotificationsSection emailConfigured={settings.system.email_configured ?? false} />
+              <MailServerSection onSaved={refreshSettings} />
               <SchedulesSection />
               <AnomalyModelSection />
               <VideoAnomalySection />
