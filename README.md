@@ -66,6 +66,13 @@ docker compose exec backend python manage.py create-user admin --role admin
 
 Ports are bound to `127.0.0.1`; put an HTTPS reverse proxy (Caddy, nginx, Traefik) in front. To enable detection, mount YOLO weights read-only (see the commented volume in `docker-compose.yml`) and set `PERSON_MODEL_PATH`.
 
+**Going live on the internet** (HTTPS with Caddy, Cloudflare Tunnel for connections without a public IP, model files, backups, where every piece of data is stored, hardware sizing): see [DEPLOYMENT.md](DEPLOYMENT.md). Short version:
+
+```bash
+cp deploy/compose.env.example .env && cp deploy/backend.env.production.example backend/.env   # then fill them in
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile tunnel up -d --build
+```
+
 ### Manual
 
 ```bash

@@ -41,3 +41,8 @@ backend/storage/
 *.db-shm
 *.pt
 *.onnx
+
+# Production deployment: compose secrets, model weights, backups
+/.env
+/models/
+/backups/

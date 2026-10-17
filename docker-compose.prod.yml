@@ -1,0 +1,74 @@
+# VIAHIND Vision - production overlay: HTTPS, model files, real client IPs, log rotation, tunnel.
+#
+#   cp deploy/compose.env.example .env                 # domain, database password, model file names
+#   cp deploy/backend.env.production.example backend/.env   # SECRET_KEY, PUBLIC_BASE_URL, ...
+#   copy the model weights into ./models (see DEPLOYMENT.md)
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#   (behind Cloudflare Tunnel add:  --profile tunnel)
+#
+# All data lives in two Docker volumes on this machine: pgdata (database) and storage
+# (evidence snapshots). Back them up with deploy/backup.sh.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  db:
+    logging: *logging
+
+  backend:
+    logging: *logging
+    environment:
+      APP_ENV: production
+      DEBUG: "False"
+      COOKIE_SECURE: "True"
+      # Behind Caddy on the private Docker network: trust its X-Forwarded-* headers (real client IPs
+      # for login throttling and rate limits). Port 8000 is only bound to 127.0.0.1 on the host.
+      FORWARDED_ALLOW_IPS: "*"
+      PERSON_MODEL_PATH: /models/${PERSON_MODEL_FILE:-yolo11n.pt}
+      FIGHT_MODEL_PATH: ${FIGHT_MODEL_FILE:+/models/video/${FIGHT_MODEL_FILE}}
+    volumes:
+      - ./models:/models:ro
+
+  frontend:
+    logging: *logging
+
+  caddy:
+    image: caddy:2.8-alpine
+    depends_on:
+      - frontend
+      - backend
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS in .env (your domain, or :80 behind Cloudflare Tunnel)}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    logging: *logging
+
+  # Optional: Cloudflare Tunnel, for a PG / office internet connection without a public IP.
+  # Create the tunnel in the Cloudflare dashboard (Zero Trust -> Networks -> Tunnels), point its
+  # public hostname to http://caddy:80 and put the token in .env as TUNNEL_TOKEN.
+  cloudflared:
+    image: cloudflare/cloudflared:2024.10.0
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      - caddy
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  caddy_data:
+  caddy_config:

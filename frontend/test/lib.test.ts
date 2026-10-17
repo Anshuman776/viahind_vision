@@ -92,3 +92,25 @@ describe('api client', () => {
     await expect(api('/overview')).rejects.toThrow(/Cannot reach the VIAHIND Vision server/);
   });
 });
+
+describe('wsUrl', () => {
+  const original = window.location;
+  const at = (url: string) => {
+    Object.defineProperty(window, 'location', { value: new URL(url), configurable: true });
+  };
+  afterEach(() => {
+    Object.defineProperty(window, 'location', { value: original, configurable: true });
+  });
+
+  it('uses the same origin behind the HTTPS proxy (no port 8000 on the internet)', async () => {
+    const { wsUrl } = await import('@/lib/ws');
+    at('https://pg.example.com/live');
+    expect(wsUrl('/ws/alerts')).toBe('wss://pg.example.com/ws/alerts');
+  });
+
+  it('uses the backend port next to the dev server', async () => {
+    const { wsUrl } = await import('@/lib/ws');
+    at('http://192.168.1.20:3000/live');
+    expect(wsUrl('/ws/live/CAM-1')).toBe('ws://192.168.1.20:8000/ws/live/CAM-1');
+  });
+});

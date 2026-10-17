@@ -1,0 +1,38 @@
+# VIAHIND Vision - HTTPS reverse proxy (used by docker-compose.prod.yml).
+#
+# SITE_ADDRESS (in the .env next to docker-compose.yml):
+#   pg.example.com   public server / port-forwarded router: Caddy gets a free Let's Encrypt
+#                    certificate automatically (ports 80 and 443 must reach this machine)
+#   :80              behind Cloudflare Tunnel: Cloudflare terminates HTTPS, nothing is opened
+#                    on the router (works behind CGNAT / Jio / Airtel home connections)
+{
+	email {$ACME_EMAIL:admin@example.com}
+	servers {
+		# Trust X-Forwarded-For from the Docker network (cloudflared) so the backend sees real client IPs.
+		trusted_proxies static private_ranges
+	}
+}
+
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	# Live video, browser camera streams and real-time alerts.
+	@ws path /ws/*
+	reverse_proxy @ws backend:8000
+
+	# Everything else (pages and /api/v1 via the Next.js rewrites).
+	reverse_proxy frontend:3000
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
