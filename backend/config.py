@@ -141,7 +141,7 @@ class Settings:
     FIGHT_CONFIDENCE_THRESHOLD_SET: bool = bool(os.getenv("FIGHT_CONFIDENCE_THRESHOLD", "").strip())
     # Motion mode: mean optical-flow magnitude (pixels per sampled frame at 112 px) counted as vigorous.
     MOTION_ANOMALY_THRESHOLD: float = float(os.getenv("MOTION_ANOMALY_THRESHOLD", "2.5"))
-    ANOMALY_SAMPLE_EVERY_N_FRAMES: int = int(os.getenv("ANOMALY_SAMPLE_EVERY_N_FRAMES", "2"))
+    ANOMALY_SAMPLE_EVERY_N_FRAMES: int = int(os.getenv("ANOMALY_SAMPLE_EVERY_N_FRAMES", "1"))
     ANOMALY_CLIP_LENGTH: int = int(os.getenv("ANOMALY_CLIP_LENGTH", "16"))
     # Positive clips in a row required before an alert (reduces one-off false alarms).
     ANOMALY_MIN_CONSECUTIVE_CLIPS: int = int(os.getenv("ANOMALY_MIN_CONSECUTIVE_CLIPS", "2"))
