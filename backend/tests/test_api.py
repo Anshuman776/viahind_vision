@@ -105,7 +105,7 @@ def test_snapshot_requires_auth_and_is_served(client, users, camera, snapshot_di
 def test_snapshot_path_cannot_escape_storage(client, users, camera, snapshot_dir):
     event_id = str(uuid.uuid4())
     with db.session_scope() as s:
-        s.add(DetectionEvent(id=event_id, camera_id=camera, occurred_at=db.utcnow(), event_type="entry", original_event_type="entry",
+        s.add(DetectionEvent(id=event_id, organization_id=1, location_id=1, camera_id=camera, occurred_at=db.utcnow(), event_type="entry", original_event_type="entry",
                              person_label="Unknown Person 99", snapshot_path="../../conftest.py", snapshot_status="saved"))
     login(client, "operator", users["operator"])
     assert client.get(f"/api/v1/events/{event_id}/snapshot").status_code == 404

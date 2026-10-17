@@ -323,9 +323,51 @@ def test_occupancy_reason_distinguishes_ongoing_and_resolved(camera):
 
     open_incident(camera, "disconnected", "No frames")
     with db.session_scope() as s:
-        assert "is not delivering video" in compute_occupancy(s)["reasons"][0]
+        assert "is not delivering video" in compute_occupancy(s, 1)["reasons"][0]
     close_incidents(camera)
     with db.session_scope() as s:
-        occ = compute_occupancy(s)
+        occ = compute_occupancy(s, 1)
         assert occ["estimated"] is True  # still flagged: events may have been missed during the gap
         assert "earlier camera interruption" in occ["reasons"][0]
+
+
+def test_zone_events_reach_the_sink_with_evidence_and_quality_is_measured(camera, snapshot_dir):
+    from services.evidence import EvidencePolicy
+    from vision.zones import ZoneConfig
+
+    received = []
+    zone = ZoneConfig(5, "Counter", "restricted", ((0.3, 0.0), (0.7, 0.0), (0.7, 1.0), (0.3, 1.0)))
+    spec = CameraSpec(id=camera, name="Main Entrance", source_type="browser", source=None, line=LINE,
+                      organization_id=1, location_id=1, zones=(zone,))
+    worker = CameraWorker(
+        spec, params_provider=lambda: PARAMS, detector_factory=ScriptedDetector, recorder=EventRecorder(),
+        detection_max_fps=200, viewer_max_fps=50,
+        zone_sink=lambda s, session, ev, jpeg: received.append((ev, jpeg)),
+        evidence_policy=lambda: EvidencePolicy(jpeg_quality=60, max_width=32, storage_limit_mb=10),
+    )
+    worker.start()
+    try:
+        push_frames(worker, 15)
+        assert wait_for(lambda: len(received) >= 1)
+        assert wait_for(lambda: worker.quality is not None)
+    finally:
+        worker.stop()
+    ev, jpeg = received[0]
+    assert ev.kind == "zone_entered" and ev.zone_id == 5 and jpeg[:2] == b"\xff\xd8"
+    import cv2
+
+    img = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert img.shape[1] <= 32  # evidence policy max width applied
+    assert set(worker.snapshot()["quality"]) == {"brightness", "contrast", "sharpness", "measured_at"}
+
+
+def test_counting_disabled_camera_records_no_crossings(camera):
+    from models.entities import Camera
+    from vision.camera_manager import line_from_camera
+
+    with db.session_scope() as s:
+        cam = s.get(Camera, camera)
+        cam.line_x1, cam.line_y1, cam.line_x2, cam.line_y2 = 0.1, 0.5, 0.9, 0.5
+        assert line_from_camera(cam) is not None
+        cam.counting_enabled = False
+        assert line_from_camera(cam) is None

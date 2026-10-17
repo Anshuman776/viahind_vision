@@ -16,9 +16,14 @@ def record_audit(
     entity_type: str,
     entity_id: Any,
     details: Optional[dict] = None,
+    organization_id: Optional[int] = None,
 ) -> AuditLog:
-    """Add an audit entry to the current transaction (committed together with the change)."""
+    """Add an audit entry to the current transaction (committed together with the change).
+
+    The organization is the acting user's; system entries (user=None) pass organization_id.
+    """
     entry = AuditLog(
+        organization_id=user.organization_id if user else organization_id,
         user_id=user.id if user else None,
         username=user.username if user else "system",
         action=action,
@@ -30,10 +35,10 @@ def record_audit(
     return entry
 
 
-def audit_trail(db: Session, entity_type: str, entity_id: Any, limit: int = 100) -> List[dict]:
+def audit_trail(db: Session, organization_id: int, entity_type: str, entity_id: Any, limit: int = 100) -> List[dict]:
     rows = db.scalars(
         select(AuditLog)
-        .where(AuditLog.entity_type == entity_type, AuditLog.entity_id == str(entity_id))
+        .where(AuditLog.organization_id == organization_id, AuditLog.entity_type == entity_type, AuditLog.entity_id == str(entity_id))
         .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
         .limit(limit)
     ).all()

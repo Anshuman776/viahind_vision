@@ -29,6 +29,10 @@ os.environ.update(
         "BOOTSTRAP_ADMIN_PASSWORD": "",
         "MIN_FREE_DISK_MB": "1",
         "CORS_ORIGINS": "http://localhost:3000",
+        "MODEL_DIR": str(TMP / "models"),
+        "ALERTS_ENABLED": "True",
+        "RATE_LIMIT_PER_MINUTE": "0",
+        "DEPLOYMENT_MODE": "standalone",
     }
 )
 
@@ -67,20 +71,25 @@ def snapshot_dir():
 
 ADMIN_PASSWORD = "AdminPass123"
 OPERATOR_PASSWORD = "OperatorPass123"
+VIEWER_PASSWORD = "ViewerPass123"
+ORG = 1
+LOCATION = 1
 
 
 @pytest.fixture
 def users():
+    # Organization 1 and location 1 are created by the migrations.
     with db.session_scope() as s:
-        s.add(User(username="admin", password_hash=hash_password(ADMIN_PASSWORD), role="admin"))
-        s.add(User(username="operator", password_hash=hash_password(OPERATOR_PASSWORD), role="operator"))
-    return {"admin": ADMIN_PASSWORD, "operator": OPERATOR_PASSWORD}
+        s.add(User(organization_id=ORG, username="admin", password_hash=hash_password(ADMIN_PASSWORD), role="admin"))
+        s.add(User(organization_id=ORG, username="operator", password_hash=hash_password(OPERATOR_PASSWORD), role="operator"))
+        s.add(User(organization_id=ORG, username="viewer", password_hash=hash_password(VIEWER_PASSWORD), role="viewer"))
+    return {"admin": ADMIN_PASSWORD, "operator": OPERATOR_PASSWORD, "viewer": VIEWER_PASSWORD}
 
 
 @pytest.fixture
 def camera():
     with db.session_scope() as s:
-        s.add(Camera(id="CAM-ENTRANCE-01", name="Main Entrance", location="Gate", source_type="browser"))
+        s.add(Camera(id="CAM-ENTRANCE-01", organization_id=ORG, location_id=LOCATION, name="Main Entrance", location="Gate", source_type="browser"))
     return "CAM-ENTRANCE-01"
 
 

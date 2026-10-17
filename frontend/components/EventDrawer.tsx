@@ -6,6 +6,7 @@ import { api, snapshotUrl } from '@/lib/api';
 import { EVENT_LABELS, UNCERTAIN_REASONS, formatDateTime, formatDuration } from '@/lib/format';
 import type { EventDetail, EventType, Page, Visit } from '@/lib/types';
 import { EventTag, ReviewBadge } from './Status';
+import { useSession } from './SessionProvider';
 
 const ACTION_LABELS: Record<string, string> = {
   'event.update': 'Updated',
@@ -30,6 +31,7 @@ export function EventDrawer({
   const [notes, setNotes] = useState('');
   const [openVisits, setOpenVisits] = useState<Visit[] | null>(null);
   const [linkVisitId, setLinkVisitId] = useState('');
+  const { isAdmin } = useSession();
 
   const load = useCallback(async () => {
     setError(null);
@@ -102,14 +104,31 @@ export function EventDrawer({
           {detail && (
             <>
               {detail.has_snapshot ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img className="snapshot-large" src={snapshotUrl(detail.id)} alt={`Snapshot of ${detail.person_label} at ${detail.event_type}`} />
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img className="snapshot-large" src={snapshotUrl(detail.id)} alt={`Snapshot of ${detail.person_label} at ${detail.event_type}`} />
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-danger"
+                      style={{ justifySelf: 'start' }}
+                      disabled={busy}
+                      onClick={() => window.confirm('Permanently delete this image? The event record is kept and the deletion is audited.') && run(() => api(`/events/${eventId}/snapshot`, { method: 'DELETE' }))}
+                    >
+                      Delete image
+                    </button>
+                  )}
+                </div>
               ) : (
                 <div className="snapshot-missing">
                   {detail.snapshot_status === 'purged'
                     ? 'Snapshot deleted by the retention policy.'
                     : detail.snapshot_status === 'skipped_low_storage'
                       ? 'Snapshot not saved: the server was low on disk space.'
+                      : detail.snapshot_status === 'skipped_storage_limit'
+                        ? 'Snapshot not saved: the evidence storage limit was reached (Settings, Evidence).'
+                        : detail.snapshot_status === 'deleted'
+                          ? 'Snapshot deleted by an administrator.'
                       : detail.snapshot_status === 'failed'
                         ? 'Snapshot could not be written to storage.'
                         : detail.is_demo

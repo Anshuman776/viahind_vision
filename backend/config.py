@@ -34,7 +34,7 @@ DEFAULT_SECRET = "viahind-default-secret-change-in-production"
 
 
 class Settings:
-    APP_NAME: str = os.getenv("APP_NAME", "VIAHIND Vision Security Analytics API")
+    APP_NAME: str = os.getenv("APP_NAME", "VIAHIND Vision API")
     # development | demo | production. "demo" serves synthetic records from a separate database.
     APP_ENV: str = os.getenv("APP_ENV", "development")
     DEBUG: bool = _bool("DEBUG", "True")
@@ -51,12 +51,11 @@ class Settings:
     BOOTSTRAP_ADMIN_USERNAME: str = os.getenv("BOOTSTRAP_ADMIN_USERNAME", "")
     BOOTSTRAP_ADMIN_PASSWORD: str = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
 
-    # Database & Redis
+    # Database
     # SQLite works out of the box. For PostgreSQL install `psycopg[binary]` and use
     # postgresql+psycopg://user:password@host:5432/viahind_vision
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./storage/viahind.db")
     DEMO_DATABASE_URL: str = os.getenv("DEMO_DATABASE_URL", "sqlite:///./storage/viahind_demo.db")
-    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
     # CORS
     @property
@@ -65,9 +64,8 @@ class Settings:
         return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
     # Video & Edge parameters
-    RTSP_BROKER_URL: str = os.getenv("RTSP_BROKER_URL", "rtsp://localhost:8554/live")
+    # Resource limit: cameras processed at the same time by this server.
     MAX_SIMULTANEOUS_STREAMS: int = int(os.getenv("MAX_SIMULTANEOUS_STREAMS", "16"))
-    EVIDENCE_STORAGE_DIR: str = os.getenv("EVIDENCE_STORAGE_DIR", "./storage/evidence")
     STORAGE_DIR: Path = _path("STORAGE_DIR", "./storage")
     SNAPSHOT_DIR: Path = _path("SNAPSHOT_DIR", "./storage/snapshots")
     # Pre-recorded clips that may be used as a "file" camera source (development/testing).
@@ -86,20 +84,79 @@ class Settings:
     # Seconds without a frame before a live camera is reported as disconnected.
     CAMERA_STALE_SECONDS: float = float(os.getenv("CAMERA_STALE_SECONDS", "5"))
 
-    # AI Classifier parameters (existing edge-agent fight classifier, see vision/anomaly.py)
-    FIGHT_DETECTOR_MODEL: str = os.getenv("FIGHT_DETECTOR_MODEL", "VIAHIND-FightClassifier-MobileNetV3")
-    FIGHT_DETECTOR_VERSION: str = os.getenv("FIGHT_DETECTOR_VERSION", "v2.4.1-edge")
-    FIGHT_CONFIDENCE_THRESHOLD: float = float(os.getenv("FIGHT_CONFIDENCE_THRESHOLD", "0.75"))
-    ENABLE_SYNTHETIC_MOCK_FALLBACK: bool = os.getenv("ENABLE_SYNTHETIC_MOCK_FALLBACK", "True").lower() in ("true", "1")
-    ANOMALY_DETECTION_ENABLED: bool = _bool("ANOMALY_DETECTION_ENABLED", "False")
-    ANOMALY_SAMPLE_EVERY_N_FRAMES: int = int(os.getenv("ANOMALY_SAMPLE_EVERY_N_FRAMES", "3"))
-    ANOMALY_CLIP_LENGTH: int = int(os.getenv("ANOMALY_CLIP_LENGTH", "16"))
+    # Camera network policy (server-side request forgery protection). Network camera URLs must
+    # resolve to an address inside CAMERA_ALLOWED_NETWORKS. Loopback, link-local (including cloud
+    # metadata 169.254.169.254), multicast and unspecified addresses are always refused.
+    CAMERA_ALLOWED_NETWORKS: str = os.getenv("CAMERA_ALLOWED_NETWORKS", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,fc00::/7")
+    CAMERA_CONNECT_TEST_TIMEOUT: float = float(os.getenv("CAMERA_CONNECT_TEST_TIMEOUT", "8"))
 
-    # Facility info (initial values for the site settings record)
-    ACTIVE_FACILITY_ID: str = os.getenv("ACTIVE_FACILITY_ID", "FAC-PG-BLOCK-A")
-    ACTIVE_FACILITY_NAME: str = os.getenv("ACTIVE_FACILITY_NAME", "PG Block A - Multi-Floor Residence")
+    # Alerts and notifications
+    ALERTS_ENABLED: bool = _bool("ALERTS_ENABLED", "True")
+    ALERT_EVAL_INTERVAL_SECONDS: float = float(os.getenv("ALERT_EVAL_INTERVAL_SECONDS", "30"))
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USERNAME: str = os.getenv("SMTP_USERNAME", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    SMTP_FROM: str = os.getenv("SMTP_FROM", "")
+    SMTP_STARTTLS: bool = _bool("SMTP_STARTTLS", "True")
+    # Webhooks normally go to the internet; private destinations need an explicit opt-in.
+    WEBHOOK_ALLOW_PRIVATE: bool = _bool("WEBHOOK_ALLOW_PRIVATE", "False")
+    # Optional: create notification channels for the default organization at startup.
+    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    ALERT_EMAIL_TO: str = os.getenv("ALERT_EMAIL_TO", "")
+    # Attach evidence snapshots to channels created from .env (email/Telegram leave your premises).
+    ALERT_ATTACH_SNAPSHOT: bool = _bool("ALERT_ATTACH_SNAPSHOT", "True")
+    ALERT_MIN_SEVERITY: str = os.getenv("ALERT_MIN_SEVERITY", "medium")
+    PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "")
+
+    # Event-level ML anomaly detection (Isolation Forest baseline, services/ml_anomaly.py)
+    MODEL_DIR: Path = _path("MODEL_DIR", "./storage/models")
+    ML_ANOMALY_ENABLED: bool = _bool("ML_ANOMALY_ENABLED", "True")
+    ML_MIN_TRAINING_HOURS: int = int(os.getenv("ML_MIN_TRAINING_HOURS", "168"))
+    ML_MIN_TRAINING_DAYS: int = int(os.getenv("ML_MIN_TRAINING_DAYS", "7"))
+
+    # Hybrid deployment. standalone: no sync. edge: push events to SYNC_URL. cloud: accept pushes.
+    DEPLOYMENT_MODE: str = os.getenv("DEPLOYMENT_MODE", "standalone")
+    SYNC_URL: str = os.getenv("SYNC_URL", "")
+    SYNC_NODE_ID: str = os.getenv("SYNC_NODE_ID", "")
+    SYNC_TOKEN: str = os.getenv("SYNC_TOKEN", "")
+    SYNC_INTERVAL_SECONDS: float = float(os.getenv("SYNC_INTERVAL_SECONDS", "15"))
+    SYNC_BATCH_SIZE: int = int(os.getenv("SYNC_BATCH_SIZE", "200"))
+
+    # API rate limiting (per client address, in-process)
+    RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "600"))
+
+    # Video anomaly detector (edge-agent/fight_detector.py via vision/anomaly.py).
+    # auto: trained classifier when FIGHT_MODEL_PATH is set, else the weight-free motion detector.
+    ANOMALY_DETECTION_ENABLED: bool = _bool("ANOMALY_DETECTION_ENABLED", "True")
+    VIDEO_ANOMALY_MODE: str = os.getenv("VIDEO_ANOMALY_MODE", "auto")
+    FIGHT_DETECTOR_MODEL: str = os.getenv("FIGHT_DETECTOR_MODEL", "VIAHIND-FightClassifier-MobileNetV3")
+    FIGHT_DETECTOR_VERSION: str = os.getenv("FIGHT_DETECTOR_VERSION", "")
+    # Trained weights (.pt with its .json metadata next to it), e.g. ./storage/models/video/fight_classifier_<v>.pt
+    FIGHT_MODEL_PATH: str = os.getenv("FIGHT_MODEL_PATH", "")
+    FIGHT_MODEL_SHA256: str = os.getenv("FIGHT_MODEL_SHA256", "")
+    # Decision threshold for the classifier; when unset, the threshold chosen at training time is used.
+    FIGHT_CONFIDENCE_THRESHOLD: float = float(os.getenv("FIGHT_CONFIDENCE_THRESHOLD", "0.75"))
+    FIGHT_CONFIDENCE_THRESHOLD_SET: bool = bool(os.getenv("FIGHT_CONFIDENCE_THRESHOLD", "").strip())
+    # Motion mode: mean optical-flow magnitude (pixels per sampled frame at 112 px) counted as vigorous.
+    MOTION_ANOMALY_THRESHOLD: float = float(os.getenv("MOTION_ANOMALY_THRESHOLD", "2.5"))
+    ANOMALY_SAMPLE_EVERY_N_FRAMES: int = int(os.getenv("ANOMALY_SAMPLE_EVERY_N_FRAMES", "2"))
+    ANOMALY_CLIP_LENGTH: int = int(os.getenv("ANOMALY_CLIP_LENGTH", "16"))
+    # Positive clips in a row required before an alert (reduces one-off false alarms).
+    ANOMALY_MIN_CONSECUTIVE_CLIPS: int = int(os.getenv("ANOMALY_MIN_CONSECUTIVE_CLIPS", "2"))
+
+    # Initial values for a new organization's settings record
+    ACTIVE_FACILITY_NAME: str = os.getenv("ACTIVE_FACILITY_NAME", "My Business")
     SITE_TIMEZONE: str = os.getenv("SITE_TIMEZONE", "Asia/Kolkata")
-    FLOORS_COUNT: int = int(os.getenv("FLOORS_COUNT", "5"))
+
+    @property
+    def IS_EDGE(self) -> bool:
+        return self.DEPLOYMENT_MODE.lower() == "edge"
+
+    @property
+    def IS_CLOUD(self) -> bool:
+        return self.DEPLOYMENT_MODE.lower() == "cloud"
 
     @property
     def IS_DEMO(self) -> bool:
@@ -120,6 +177,14 @@ class Settings:
                 raise RuntimeError("SECRET_KEY must be a strong random value (32+ chars) in production.")
             if not self.COOKIE_SECURE:
                 raise RuntimeError("COOKIE_SECURE must be True in production (serve over HTTPS).")
+            if self.DEBUG:
+                raise RuntimeError("DEBUG must be False in production.")
+        if self.DEPLOYMENT_MODE.lower() not in ("standalone", "edge", "cloud"):
+            raise RuntimeError("DEPLOYMENT_MODE must be standalone, edge or cloud.")
+        if self.IS_EDGE and not (self.SYNC_URL and self.SYNC_NODE_ID and self.SYNC_TOKEN):
+            raise RuntimeError("DEPLOYMENT_MODE=edge needs SYNC_URL, SYNC_NODE_ID and SYNC_TOKEN.")
+        if self.IS_EDGE and self.IS_PRODUCTION and not self.SYNC_URL.startswith("https://"):
+            raise RuntimeError("SYNC_URL must use https:// in production.")
 
 
 settings = Settings()

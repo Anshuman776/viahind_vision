@@ -1,15 +1,25 @@
-"""Event snapshot storage. Only event-relevant crops are stored, never continuous video."""
+"""Event evidence storage. Only event-relevant crops are stored, never continuous video.
+
+Files are kept per organization (org_<id>/<kind>/YYYY/MM/DD/<id>.jpg) so that storage limits and
+deletion can be applied per tenant. They are served only through authenticated API routes.
+"""
 
 import logging
 import os
 import shutil
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from config import settings
 
 logger = logging.getLogger("viahind.snapshots")
+
+USAGE_CACHE_SECONDS = 60.0
+_usage_cache: Dict[int, Tuple[float, int]] = {}
+_usage_lock = threading.Lock()
 
 
 def snapshot_root() -> Path:
@@ -27,14 +37,54 @@ def storage_status() -> dict:
     return {"free_mb": int(free_mb), "low": free_mb < settings.MIN_FREE_DISK_MB, "min_free_mb": settings.MIN_FREE_DISK_MB}
 
 
-def save_snapshot(event_id: str, occurred_at: datetime, jpeg: Optional[bytes]) -> Tuple[Optional[str], str]:
+def organization_usage_bytes(organization_id: int, fresh: bool = False) -> int:
+    """Bytes of evidence stored for one organization (cached briefly; walking the tree is not free)."""
+    now = time.monotonic()
+    with _usage_lock:
+        cached = _usage_cache.get(organization_id)
+        if cached and not fresh and now - cached[0] < USAGE_CACHE_SECONDS:
+            return cached[1]
+    total = 0
+    base = snapshot_root() / f"org_{organization_id}"
+    if base.is_dir():
+        for dirpath, _dirs, files in os.walk(base):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, name))
+                except OSError:
+                    pass
+    with _usage_lock:
+        _usage_cache[organization_id] = (now, total)
+    return total
+
+
+def _add_usage(organization_id: int, delta: int) -> None:
+    with _usage_lock:
+        cached = _usage_cache.get(organization_id)
+        if cached:
+            _usage_cache[organization_id] = (cached[0], max(0, cached[1] + delta))
+
+
+def save_snapshot(
+    item_id: str,
+    occurred_at: datetime,
+    jpeg: Optional[bytes],
+    organization_id: Optional[int] = None,
+    limit_mb: int = 0,
+    kind: str = "events",
+) -> Tuple[Optional[str], str]:
     """Write a snapshot; returns (relative path, snapshot_status)."""
     if not jpeg:
         return None, "none"
     if storage_status()["low"]:
-        logger.warning("Snapshot for event %s skipped: free disk space below MIN_FREE_DISK_MB", event_id)
+        logger.warning("Snapshot %s skipped: free disk space below MIN_FREE_DISK_MB", item_id)
         return None, "skipped_low_storage"
-    rel = f"{occurred_at:%Y/%m/%d}/{event_id}.jpg"
+    if organization_id is not None and limit_mb > 0:
+        if organization_usage_bytes(organization_id) + len(jpeg) > limit_mb * 1024 * 1024:
+            logger.warning("Snapshot %s skipped: organization %s reached its evidence storage limit", item_id, organization_id)
+            return None, "skipped_storage_limit"
+    prefix = f"org_{organization_id}/{kind}/" if organization_id is not None else ""
+    rel = f"{prefix}{occurred_at:%Y/%m/%d}/{item_id}.jpg"
     path = snapshot_root() / rel
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,8 +92,10 @@ def save_snapshot(event_id: str, occurred_at: datetime, jpeg: Optional[bytes]) -
         tmp.write_bytes(jpeg)
         os.replace(tmp, path)
     except OSError:
-        logger.exception("Failed to write snapshot for event %s", event_id)
+        logger.exception("Failed to write snapshot %s", item_id)
         return None, "failed"
+    if organization_id is not None:
+        _add_usage(organization_id, len(jpeg))
     return rel, "saved"
 
 
@@ -62,6 +114,10 @@ def delete_snapshot(rel: Optional[str]) -> None:
     path = snapshot_file(rel)
     if path is not None:
         try:
+            size = path.stat().st_size
             path.unlink()
+            parts = Path(rel).parts
+            if parts and parts[0].startswith("org_") and parts[0][4:].isdigit():
+                _add_usage(int(parts[0][4:]), -size)
         except OSError:
             logger.warning("Could not delete snapshot %s", rel)

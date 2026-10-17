@@ -1,5 +1,5 @@
 """
-Per-camera worker: capture -> person tracking -> line crossing -> events, plus live view frames.
+Per-camera worker: capture -> person tracking -> line crossing / zones -> events, plus live view frames.
 
 Threads per camera:
 - capture  (server-side sources only): reads frames from USB / RTSP / HTTP / test clips with
@@ -24,10 +24,13 @@ import cv2
 import numpy as np
 
 from vision.line_crossing import CrossingEvent, CrossingParams, Detection, LineConfig, LineCrossingCounter
+from vision.quality import measure_quality
+from vision.zones import ZoneConfig, ZoneEvent, ZoneMonitor
 
 logger = logging.getLogger("viahind.camera")
 
 SNAPSHOT_MAX_AGE = 2.0  # seconds a buffered best crop stays relevant for an event
+QUALITY_INTERVAL = 5.0  # seconds between image-quality measurements
 
 
 @dataclass
@@ -38,6 +41,9 @@ class CameraSpec:
     source: Union[int, str, None]
     line: Optional[LineConfig]
     detection_enabled: bool = True
+    organization_id: Optional[int] = None
+    location_id: Optional[int] = None
+    zones: Tuple[ZoneConfig, ...] = ()
 
 
 class Publisher(Protocol):
@@ -47,7 +53,11 @@ class Publisher(Protocol):
 
 
 class Recorder(Protocol):
-    def record(self, camera_id: str, session_id: str, crossing: CrossingEvent, snapshot_jpeg: Optional[bytes]) -> Optional[dict]: ...
+    def record(self, camera_id: str, session_id: str, crossing: CrossingEvent, snapshot_jpeg: Optional[bytes], **kwargs) -> Optional[dict]: ...
+
+
+# zone_sink(spec, session_id, zone_event, snapshot_jpeg)
+ZoneSink = Callable[["CameraSpec", str, ZoneEvent, Optional[bytes]], None]
 
 
 class NullPublisher:
@@ -101,6 +111,8 @@ class CameraWorker:
         detection_max_fps: float = 8.0,
         viewer_max_fps: float = 8.0,
         clock: Callable[[], float] = time.time,
+        zone_sink: Optional[ZoneSink] = None,
+        evidence_policy: Optional[Callable[[], object]] = None,
     ):
         self.spec = spec
         self.params_provider = params_provider
@@ -120,10 +132,18 @@ class CameraWorker:
         self.detection_interval = 1.0 / max(0.1, detection_max_fps)
         self.viewer_interval = 1.0 / max(0.1, viewer_max_fps)
         self.clock = clock
+        self.zone_sink = zone_sink
+        self.evidence_policy = evidence_policy
 
         self.session_id = str(uuid.uuid4())
-        self.counter = LineCrossingCounter(spec.line, params_provider())
+        params = params_provider()
+        self.counter = LineCrossingCounter(spec.line, params)
+        self.zones = ZoneMonitor(spec.zones, min_confidence=params.min_confidence, anchor=params.anchor)
         self._pending_line: Optional[Tuple[Optional[LineConfig]]] = None
+        self._pending_zones: Optional[Tuple[ZoneConfig, ...]] = None
+        self.quality: Optional[dict] = None
+        self._last_quality = 0.0
+        self._zone_counts: Dict[int, int] = {}
         self._lock = threading.Lock()
         self._frame_cond = threading.Condition()
         self._frame: Union[np.ndarray, bytes, None] = None
@@ -184,6 +204,10 @@ class CameraWorker:
     def update_line(self, line: Optional[LineConfig]) -> None:
         with self._lock:
             self._pending_line = (line,)
+
+    def update_zones(self, zones: Tuple[ZoneConfig, ...]) -> None:
+        with self._lock:
+            self._pending_zones = tuple(zones)
 
     def _spawn(self, target, name: str) -> None:
         t = threading.Thread(target=self._guard(target), name=f"cam-{self.spec.id}-{name}", daemon=True)
@@ -306,8 +330,10 @@ class CameraWorker:
             h, w = image.shape[:2]
             self._frame_size = (w, h)
 
-            if self.anomaly is not None:
-                self.anomaly.process_frame(self.spec.id, image, ts)
+            if ts - self._last_quality >= QUALITY_INTERVAL:
+                self._last_quality = ts
+                sample = measure_quality(image, ts)
+                self.quality = sample.as_dict() if sample else None
 
             detections: List[Detection] = []
             if detector is not None:
@@ -319,6 +345,11 @@ class CameraWorker:
                     self._set_detection("error", f"Detection failed on a frame: {type(exc).__name__}")
                     logger.exception("Detection failed on camera %s", self.spec.id)
                     continue
+            if self.anomaly is not None:
+                # People boxes let the motion detector look only at people in close contact.
+                min_conf = self.counter.params.min_confidence
+                people = [d.box for d in detections if d.track_id is not None and d.confidence >= min_conf] if detector is not None else None
+                self.anomaly.process_frame(self.spec.id, image, ts, people)
             self._process_detections(image, ts, detections)
 
     def _init_detector(self):
@@ -348,6 +379,9 @@ class CameraWorker:
     def _apply_pending_config(self) -> None:
         with self._lock:
             pending, self._pending_line = self._pending_line, None
+            pending_zones, self._pending_zones = self._pending_zones, None
+        if pending_zones is not None:
+            self.zones.set_zones(pending_zones)
         if pending is not None:
             self.counter.set_line(pending[0])
             self._candidates.clear()
@@ -356,6 +390,7 @@ class CameraWorker:
         params = self.params_provider()
         if params != self.counter.params:
             self.counter.set_params(params)
+            self.zones.min_confidence, self.zones.anchor = params.min_confidence, params.anchor
 
     def _decode(self, frame) -> Optional[np.ndarray]:
         if isinstance(frame, np.ndarray):
@@ -381,6 +416,9 @@ class CameraWorker:
         events = self.counter.update(detections, ts, (image.shape[1], image.shape[0]))
         for event in events:
             self._record(event, image, ts)
+        for zone_event in self.zones.update(detections, ts, (image.shape[1], image.shape[0])):
+            self._zone_event(zone_event, image)
+        self._zone_counts = self.zones.occupancy()
 
         live_ids = set(self.counter.tracks)
         for tid in [t for t in self._candidates if t not in live_ids]:
@@ -408,11 +446,31 @@ class CameraWorker:
             crop = candidate[2]
         elif event.reason != "lost_while_crossing":
             crop = crop_snapshot(image, event.box)
-        jpeg = encode_jpeg(crop, quality=90) if crop is not None else None
-        result = self.recorder.record(self.spec.id, self.session_id, event, jpeg)
+        jpeg = self._encode_evidence(crop) if crop is not None else None
+        if self.spec.organization_id is not None:
+            result = self.recorder.record(self.spec.id, self.session_id, event, jpeg, organization_id=self.spec.organization_id)
+        else:
+            result = self.recorder.record(self.spec.id, self.session_id, event, jpeg)
         if result is not None:
             self.events_recorded += 1
             self._labels[event.track_id] = result.get("person_label")
+
+    def _encode_evidence(self, image: np.ndarray) -> Optional[bytes]:
+        policy = self.evidence_policy() if self.evidence_policy else None
+        if policy is None:
+            return encode_jpeg(image, quality=90)
+        return encode_jpeg(image, quality=int(policy.jpeg_quality), max_width=int(policy.max_width) or None)
+
+    def _zone_event(self, event: ZoneEvent, image: np.ndarray) -> None:
+        if self.zone_sink is None:
+            return
+        # Evidence for a zone alert: the person with some context, never the full stream.
+        crop = crop_snapshot(image, event.box)
+        jpeg = self._encode_evidence(crop) if crop is not None else None
+        try:
+            self.zone_sink(self.spec, self.session_id, event, jpeg)
+        except Exception:
+            logger.exception("Zone event handling failed on camera %s", self.spec.id)
 
     def _check_stale(self, detector) -> None:
         if self.status != "live" or self.last_frame_at is None:
@@ -420,6 +478,8 @@ class CameraWorker:
         if self.clock() - self.last_frame_at <= self.stale_seconds:
             return
         dropped = self.counter.reset()
+        self.zones.reset()
+        self._zone_counts = {}
         self._candidates.clear()
         self._labels.clear()
         self._overlay = []
@@ -474,6 +534,7 @@ class CameraWorker:
                     "image": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii"),
                     "tracks": self._overlay,
                     "line": None if line is None else {"x1": line.x1, "y1": line.y1, "x2": line.x2, "y2": line.y2, "entry_side": line.entry_side},
+                    "zones": [{"id": z.id, "name": z.name, "kind": z.kind, "polygon": [list(p) for p in z.polygon], "count": self._zone_counts.get(z.id, 0)} for z in self.zones.zones],
                 },
             )
 
@@ -503,6 +564,9 @@ class CameraWorker:
             "events_recorded": self.events_recorded,
             "started_at": self.started_at,
             "frame_size": self._frame_size,
+            "quality": self.quality,
+            "session_id": self.session_id,
+            "organization_id": self.spec.organization_id,
         }
 
     def latest_jpeg(self) -> Optional[bytes]:

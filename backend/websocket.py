@@ -17,8 +17,9 @@ class AlertConnectionManager:
     """
 
     def __init__(self):
-        # General alerts WebSocket connections
-        self.active_alert_connections: List[WebSocket] = []
+        # System channel connections and the organization each signed-in user belongs to.
+        # Messages are only ever sent to connections of the message's organization.
+        self.active_alert_connections: Dict[WebSocket, int] = {}
         # Live camera viewers: camera_id -> set of WebSockets
         self.camera_viewers: Dict[str, Set[WebSocket]] = {}
         # Active browser/phone streamers: camera_id -> WebSocket
@@ -30,25 +31,26 @@ class AlertConnectionManager:
         self.loop = loop
 
     # Alert channel methods
-    async def connect_alerts(self, websocket: WebSocket):
+    async def connect_alerts(self, websocket: WebSocket, organization_id: int):
         await websocket.accept()
-        self.active_alert_connections.append(websocket)
+        self.active_alert_connections[websocket] = organization_id
 
     def disconnect_alerts(self, websocket: WebSocket):
-        if websocket in self.active_alert_connections:
-            self.active_alert_connections.remove(websocket)
+        self.active_alert_connections.pop(websocket, None)
 
-    async def broadcast_alert(self, message: dict):
-        for connection in list(self.active_alert_connections):
+    async def broadcast_alert(self, message: dict, organization_id: int):
+        for connection, org_id in list(self.active_alert_connections.items()):
+            if org_id != organization_id:
+                continue
             try:
                 await connection.send_json(message)
             except Exception:
                 self.disconnect_alerts(connection)
 
-    def broadcast_threadsafe(self, message: dict) -> None:
-        if self.loop is None or self.loop.is_closed():
+    def broadcast_threadsafe(self, message: dict, organization_id: Optional[int]) -> None:
+        if organization_id is None or self.loop is None or self.loop.is_closed():
             return
-        asyncio.run_coroutine_threadsafe(self.broadcast_alert(message), self.loop)
+        asyncio.run_coroutine_threadsafe(self.broadcast_alert(message, organization_id), self.loop)
 
     # Browser stream ingestion methods
     async def register_streamer(self, camera_id: str, websocket: WebSocket):
@@ -107,7 +109,7 @@ class AlertConnectionManager:
         asyncio.run_coroutine_threadsafe(self.relay_frame(camera_id, payload), self.loop)
 
     def publish_status(self, camera_id: str, status: dict) -> None:
-        self.broadcast_threadsafe({"type": "camera_status", "camera_id": camera_id, "status": status})
+        self.broadcast_threadsafe({"type": "camera_status", "camera_id": camera_id, "status": status}, status.get("organization_id"))
 
 
 manager = AlertConnectionManager()

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import session_scope, utcnow
-from models.entities import CameraIncident
+from models.entities import Camera, CameraIncident
 
 logger = logging.getLogger("viahind.incidents")
 
@@ -19,8 +19,9 @@ def open_incident(camera_id: Optional[str], kind: str, message: str) -> None:
             existing = db.scalar(
                 select(CameraIncident).where(CameraIncident.camera_id == camera_id, CameraIncident.ended_at.is_(None))
             )
-            if existing is None:
-                db.add(CameraIncident(camera_id=camera_id, kind=kind, message=message[:500], started_at=utcnow()))
+            cam = db.get(Camera, camera_id) if camera_id else None
+            if existing is None and cam is not None:
+                db.add(CameraIncident(organization_id=cam.organization_id, camera_id=camera_id, kind=kind, message=message[:500], started_at=utcnow()))
     except SQLAlchemyError:
         logger.exception("Could not record camera incident")
 
@@ -34,3 +35,18 @@ def close_incidents(camera_id: str) -> None:
                 incident.ended_at = utcnow()
     except SQLAlchemyError:
         logger.exception("Could not close camera incidents")
+
+
+def record_camera_error(camera_id: str, message: Optional[str]) -> None:
+    """Persist the latest camera error (or clear it) for diagnostics after restarts."""
+    try:
+        with session_scope() as db:
+            cam = db.get(Camera, camera_id)
+            if cam is None:
+                return
+            if message:
+                cam.last_error, cam.last_error_at = message[:500], utcnow()
+            elif cam.last_error is not None:
+                cam.last_error = None
+    except SQLAlchemyError:
+        logger.exception("Could not record camera error")

@@ -14,6 +14,6 @@ def anomaly_status(_: User = Depends(require_operator)):
 
 
 @router.get("/events")
-def anomaly_events(limit: int = Query(50, ge=1, le=500), _: User = Depends(require_operator)):
-    """Outputs recorded from the existing anomaly classifier. Empty unless it reports something."""
-    return list_anomaly_events(limit=limit)
+def anomaly_events(limit: int = Query(50, ge=1, le=500), user: User = Depends(require_operator)):
+    """Outputs recorded from the existing video anomaly classifier. Empty unless it reports something."""
+    return list_anomaly_events(user.organization_id, limit=limit)

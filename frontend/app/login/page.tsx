@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ShieldCheck } from 'lucide-react';
 import { api } from '@/lib/api';
@@ -49,7 +50,7 @@ export default function LoginPage() {
             </div>
             <div>
               <h1 className="brand-name">VIAHIND Vision</h1>
-              <div className="brand-sub">PG Surveillance System</div>
+              <div className="brand-sub">AI CCTV Business Intelligence</div>
             </div>
           </div>
 
@@ -83,9 +84,12 @@ export default function LoginPage() {
               {busy ? 'Signing in…' : 'Sign in'}
             </button>
             <p className="muted small">
-              Authorised operators only. Camera footage and records are personal data; access is logged.
+              Authorised users only. Camera images and records are personal data; access is logged.
             </p>
           </form>
+          <p className="small" style={{ marginTop: 14 }}>
+            <Link href="/">← Back to the VIAHIND Vision website</Link>
+          </p>
         </div>
       </div>
     </main>

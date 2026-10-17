@@ -6,14 +6,23 @@ Source strings can contain camera credentials (rtsp://user:pass@host/...). They 
 - encrypted in the database with a key derived from SECRET_KEY,
 - never returned by the API (only a masked description is),
 - optionally kept entirely out of the database with an "env:CAMERA_..." reference.
+
+Network destinations are restricted (server-side request forgery protection): a camera URL must
+resolve only to addresses inside CAMERA_ALLOWED_NETWORKS (private LAN ranges by default), and
+loopback, link-local (including cloud metadata at 169.254.169.254), multicast, unspecified and
+reserved addresses are always refused. The check runs when the source is saved and again every
+time a worker opens it (a hostname could be re-pointed in between).
 """
 
 import base64
 import hashlib
+import ipaddress
 import os
 import re
+import socket
+import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import List, Optional, Tuple, Union
 from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -45,6 +54,62 @@ def decrypt_source(token: str) -> str:
         raise SourceError("The stored camera source cannot be decrypted (was SECRET_KEY changed?). Re-enter it in Settings.") from exc
 
 
+DEFAULT_PORTS = {"rtsp": 554, "rtsps": 322, "http": 80, "https": 443}
+
+
+def _allowed_networks() -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
+    nets = []
+    for item in settings.CAMERA_ALLOWED_NETWORKS.split(","):
+        item = item.strip()
+        if item:
+            try:
+                nets.append(ipaddress.ip_network(item, strict=False))
+            except ValueError:
+                continue
+    return nets
+
+
+def address_allowed(address: str) -> Tuple[bool, str]:
+    """Whether one resolved IP address is an acceptable camera destination."""
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False, "invalid address"
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+        return False, "loopback, link-local, multicast and reserved addresses are not allowed"
+    if not any(ip in net for net in _allowed_networks()):
+        return False, "the address is outside the camera networks allowed on this server (CAMERA_ALLOWED_NETWORKS)"
+    return True, ""
+
+
+def resolve_host(host: str, port: int) -> List[str]:
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError) as exc:
+        raise SourceError(f"The camera host name could not be resolved ({host}).") from exc
+    return sorted({info[4][0] for info in infos})
+
+
+def check_network_destination(url: str) -> Tuple[str, int, List[str]]:
+    """Raise SourceError unless every address the URL's host resolves to is allowed."""
+    parts = urlsplit(url)
+    host = parts.hostname
+    if not host:
+        raise SourceError("The camera URL has no host.")
+    try:
+        port = parts.port or DEFAULT_PORTS.get(parts.scheme.lower(), 554)
+    except ValueError as exc:
+        raise SourceError("The camera URL has an invalid port.") from exc
+    addresses = resolve_host(host, port)
+    for address in addresses:
+        ok, why = address_allowed(address)
+        if not ok:
+            raise SourceError(f"This camera address is not allowed: {why}.")
+    return host, port, addresses
+
+
 def validate_source(source_type: str, value: Optional[str]) -> Optional[str]:
     """Normalise and validate a source for the given type. Returns the value to store."""
     value = (value or "").strip()
@@ -68,6 +133,7 @@ def validate_source(source_type: str, value: Optional[str]) -> Optional[str]:
             raise SourceError("Network cameras need an rtsp://, rtsps://, http:// or https:// URL, or an env:CAMERA_... reference.")
         if " " in value:
             raise SourceError("The camera URL must not contain spaces.")
+        check_network_destination(value)
         return value
 
     if source_type == "file":
@@ -111,6 +177,7 @@ def resolve_source(source_type: str, value: Optional[str]) -> Union[int, str]:
             if not resolved:
                 raise SourceError(f"Environment variable {match.group(1)} is not set on the server.")
             return resolved
+        check_network_destination(value or "")
         return value or ""
     if source_type == "file":
         if not settings.ALLOW_FILE_SOURCES:
@@ -121,3 +188,21 @@ def resolve_source(source_type: str, value: Optional[str]) -> Union[int, str]:
             raise SourceError(f"Test clip not found in the test video folder ({base.name}/).")
         return str(path)
     raise SourceError("This camera type does not have a server-side source.")
+
+
+def probe_tcp(url: str, timeout: float) -> dict:
+    """TCP reachability check with an operator-readable diagnosis. Never includes credentials."""
+    host, port, addresses = check_network_destination(url)
+    started = time.monotonic()
+    last_error = None
+    for address in addresses:
+        try:
+            with socket.create_connection((address, port), timeout=timeout):
+                return {"ok": True, "port": port, "elapsed_ms": int((time.monotonic() - started) * 1000)}
+        except socket.timeout:
+            last_error = f"No response from {host}:{port} within {timeout:.0f}s. Check that the camera is powered on and on the same network as the server."
+        except ConnectionRefusedError:
+            last_error = f"{host} refused the connection on port {port}. The camera may use a different RTSP/HTTP port, or streaming is disabled in its settings."
+        except OSError:
+            last_error = f"{host}:{port} is unreachable from the server (no route). Check cabling, VLANs and firewall rules."
+    return {"ok": False, "port": port, "message": last_error or "The camera could not be reached."}

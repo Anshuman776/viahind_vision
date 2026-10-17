@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from auth import create_session_token, get_current_user, hash_password, login_throttle, verify_password
 from config import settings
 from db import get_db, utcnow
-from models.entities import User
+from models.entities import Organization, User
 from models.schemas import LoginRequest
 from services.audit import record_audit
 
@@ -20,6 +20,8 @@ def serialize_user(user: User) -> dict:
         "id": user.id,
         "username": user.username,
         "role": user.role,
+        "email": user.email,
+        "organization_id": user.organization_id,
         "is_active": user.is_active,
         "created_at": user.created_at.isoformat(),
         "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
@@ -62,8 +64,11 @@ def logout(response: Response):
 
 
 @router.get("/me")
-def me(user: User = Depends(get_current_user)):
-    return serialize_user(user)
+def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    data = serialize_user(user)
+    org = db.get(Organization, user.organization_id)
+    data["organization"] = {"id": org.id, "name": org.name, "plan": org.plan, "max_cameras": org.max_cameras}
+    return data
 
 
 @router.get("/setup-status")

@@ -1,6 +1,6 @@
 > **Superseded.** This guide describes the earlier multi-floor CCTV matrix UI, which has been replaced by the
-> VIAHIND Vision PG Surveillance System. Cameras are now added in **Settings → Cameras**; see `README.md`
-> ("Connecting cameras"). Kept for reference only.
+> current VIAHIND Vision console. Cameras are now added in **Settings → Cameras**; see `README.md`
+> ("Cameras"). Kept for reference only.
 
 # Multi-Floor & Multi-Camera Setup Guide: VIAHIND Vision
 

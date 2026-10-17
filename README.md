@@ -1,200 +1,263 @@
-# VIAHIND Vision — PG Surveillance System
+# VIAHIND Vision — AI CCTV Business Intelligence
 
-Entrance monitoring for PG (paying guest) accommodation. VIAHIND Vision watches authorised entrance
-cameras, detects and tracks people, records **entry** and **exit** events when a tracked person crosses
-a configured entrance line, keeps an event snapshot for each crossing, and maintains a searchable log,
-visits and an occupancy count.
+VIAHIND Vision turns existing CCTV cameras (RTSP/HTTP IP cameras, DVR/NVR outputs, USB webcams and
+phones) into business figures for shops, supermarkets, restaurants, hotels, offices and other premises:
 
-- **Overview**: people currently inside, entries, exits and unknown visitors today, a live preview, camera connection, an hourly chart and recent activity.
-- **Live Camera**: start, stop and reconnect cameras, see what the server receives (with tracking overlay), and draw the entrance line and its direction.
-- **Entry & Exit Logs**: filter, search, review, correct, link visits, view snapshots, export CSV.
-- **Settings**: site, timezone, detection and tracking, retention, cameras, operator accounts, integrations.
+- **Footfall and occupancy**: entries and exits counted at a configurable line, estimated occupancy per location, reconciliation tools.
+- **Reviewable alerts**: explainable rules (restricted zones, dwell time, after-hours activity, unusual traffic, occupancy, camera offline/obstructed, processing problems) and an optional Isolation Forest baseline for unusual activity patterns. Every alert has a reason, the measured values, a severity and a review status.
+- **Event evidence**: one snapshot per recorded event or zone alert (never continuous video), with retention, storage limits, access control and audited deletion.
+- **Reports**: daily/weekly/monthly footfall, peak hours, weekday pattern, camera and location comparisons, previous-period comparison, alert summaries, CSV export, print/PDF and scheduled email/webhook reports.
+- **SaaS foundations**: organizations (tenants), multiple locations, roles (admin / operator / viewer), audit log, plan limits, optional edge → cloud synchronisation.
 
-All figures come from persisted records. Nothing on screen is simulated, except in the separate demo mode, which uses its own database and shows a banner.
+Everything on screen comes from stored records. Nothing is simulated, except in the separate demo mode, which uses its own database and shows a banner.
+
+> **What it does not do.** Person detection is not identification. Labels such as *Unknown Person 07* are temporary tracking labels; they reset when a camera reconnects and never establish who someone is. There is no face recognition (see §9). Alerts describe measured conditions for human review and are never proof of wrongdoing.
 
 ---
 
 ## 1. Architecture
 
 ```
-browser (Next.js 16, React 19)                       backend (FastAPI)
- ├─ /overview /live /logs /settings                   ├─ routers/        REST API (/api/v1)
- ├─ /streamer (phone as camera)          /api/v1 ──►  ├─ auth.py         bcrypt + JWT in httpOnly cookie, roles, CSRF header
- │    same-origin rewrite (next.config.ts)            ├─ services/       events, visits, occupancy, stats, retention, audit
- └─ WebSockets ───────────────────────── :8000 ──►   ├─ vision/
-      /ws/alerts  status + new events                 │   ├─ camera_manager.py  one worker per camera
-      /ws/live/{id}  live frames + overlay            │   ├─ camera_worker.py   capture → detect/track → line crossing → events
-      /ws/stream/{id}  browser camera frames in       │   ├─ line_crossing.py   entry/exit/uncertain logic (pure, unit-tested)
-                                                      │   ├─ detector.py        YOLO + ByteTrack (from viahind-person-counter)
-                                                      │   ├─ anomaly.py         boundary to the existing anomaly model
-                                                      │   └─ sources.py         camera source validation / encryption / masking
-                                                      ├─ edge-agent/     rtsp_reader.py (OpenCV reader), fight_detector.py (existing)
-                                                      ├─ models/entities.py + migrations/   SQLAlchemy + Alembic
-                                                      └─ storage/        SQLite DB, event snapshots, test clips (git-ignored)
+browser (Next.js 16, React 19, TypeScript)                backend (FastAPI, Python 3.11+)
+ ├─ /overview /live /alerts /logs /evidence /reports      ├─ routers/       REST API (/api/v1), every query tenant-scoped
+ │  /settings /streamer                                    ├─ auth.py        bcrypt + JWT in httpOnly cookie, roles, CSRF header
+ │    same-origin rewrite (next.config.ts) ── /api/v1 ──►  ├─ services/
+ └─ WebSockets ─────────────────────────────── :8000 ──►  │   ├─ events, visits, occupancy, stats      counting, per-location occupancy, reports
+      /ws/alerts       events, camera status, alerts       │   ├─ alert_rules, alert_engine, alerts     rule catalogue, evaluation, dedup, review
+      /ws/live/{id}    live frames + overlay               │   ├─ notifications, report_schedules       email/webhook delivery, retries, rate limits
+      /ws/stream/{id}  browser camera frames in            │   ├─ ml_anomaly                            Isolation Forest training / inference
+                                                           │   ├─ sync                                  edge outbox, cloud ingest
+                                                           │   └─ tenancy, retention, audit, snapshots, evidence
+                                                           ├─ vision/
+                                                           │   ├─ camera_manager.py / camera_worker.py  capture → detect/track → line + zones → events
+                                                           │   ├─ line_crossing.py   entry/exit/uncertain logic (pure, unit-tested)
+                                                           │   ├─ zones.py           zone presence / dwell (pure, unit-tested)
+                                                           │   ├─ quality.py         brightness / contrast / sharpness probe
+                                                           │   ├─ detector.py        YOLO + ByteTrack
+                                                           │   └─ sources.py         source validation, SSRF policy, encryption, masking
+                                                           ├─ models/entities.py + migrations/   SQLAlchemy 2 + Alembic (SQLite or PostgreSQL)
+                                                           └─ storage/       evidence images, model artifacts (git-ignored)
 ```
 
-**Camera types**
+**Deployment modes** (`DEPLOYMENT_MODE`)
 
-| Type | How frames arrive | Typical use |
-|---|---|---|
-| Browser camera | A signed-in operator's browser sends JPEG frames over an authenticated WebSocket | Laptop/USB webcam, or a phone using `/streamer` |
-| IP / CCTV | Backend worker opens an `rtsp://`, `rtsps://`, `http(s)://` (MJPEG) URL with OpenCV | IP cameras, DVR/NVR RTSP outputs |
-| USB camera on server | Backend opens device index `0`, `1`, … | Webcam plugged into the server |
-| Test clip | Backend plays a file from `backend/storage/test_videos/` at native speed | Development and testing only |
+| Mode | Use |
+|---|---|
+| `standalone` (default) | One server at the premises (or one per site) runs cameras, API and dashboards. |
+| `edge` | Same as standalone, plus every event and correction is queued in a local outbox and pushed to a cloud instance. Recording continues offline; the outbox resumes with backoff and never duplicates events. |
+| `cloud` | Accepts pushes from registered edge nodes (`POST /api/v1/sync/events`) for central dashboards and reports. Images and camera credentials never leave the edge. |
 
-A camera shows **Live** only while the backend is actually receiving frames (no frame for
-`CAMERA_STALE_SECONDS`, 5 s by default, means Disconnected).
+One backend process runs the camera workers: run it with **one** uvicorn worker (`--workers 1`), one process per site.
 
 ---
 
 ## 2. Install and run
 
-Requirements: Python 3.11+ and Node.js 20+.
+Requirements: Python 3.11+ and Node.js 20+ (or Docker).
 
-### Backend
+### Docker (PostgreSQL)
+
+```bash
+cp backend/.env.example backend/.env        # set SECRET_KEY, APP_ENV=production, COOKIE_SECURE=True, DEBUG=False
+export POSTGRES_PASSWORD='<strong password>'
+docker compose up -d --build
+docker compose exec backend python manage.py create-user admin --role admin
+```
+
+Ports are bound to `127.0.0.1`; put an HTTPS reverse proxy (Caddy, nginx, Traefik) in front. To enable detection, mount YOLO weights read-only (see the commented volume in `docker-compose.yml`) and set `PERSON_MODEL_PATH`.
+
+### Manual
 
 ```bash
 cd backend
 python -m venv .venv
-.venv\Scripts\activate            # Windows   (Linux/macOS: source .venv/bin/activate)
-pip install -r requirements.txt
-copy .env.example .env            # Linux/macOS: cp .env.example .env
+.venv\Scripts\activate                      # Linux/macOS: source .venv/bin/activate
+pip install -r requirements-dev.txt         # requirements.txt for production
+copy .env.example .env                      # Linux/macOS: cp .env.example .env
+python manage.py create-user admin --role admin     # prompts for a password; applies migrations
+uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
 ```
-
-Edit `backend/.env`:
-
-- `SECRET_KEY`: generate one with `python -c "import secrets; print(secrets.token_hex(32))"`.
-- `PERSON_MODEL_PATH`: path to an existing YOLO checkpoint, for example the `yolo11n.pt` from `viahind-person-counter`. Weights are **never downloaded automatically**. Without it, cameras still stream but no entries or exits are recorded, and the UI says so.
-
-Then:
-
-```bash
-python manage.py create-user admin --role admin     # prompts for a password; also applies migrations
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-Migrations also run automatically at startup (`alembic upgrade head`). Health: `GET /health` (liveness), `GET /health/ready` (database, storage, detector, anomaly, pending writes).
-
-### Frontend
 
 ```bash
 cd frontend
 npm install --legacy-peer-deps
-npm run dev        # http://localhost:3000
+npm run dev                                  # http://localhost:3000
+# production: npm run build && npm start   (set BACKEND_URL before building if the API is not on 127.0.0.1:8000)
 ```
 
-For production: `npm run build && npm start`. Set `BACKEND_URL` before building if the API is not on `127.0.0.1:8000` (see `frontend/.env.example`).
+Health: `GET /health` (liveness) and `GET /health/ready` (database, storage, detector, pending writes). Migrations also run at startup.
 
-### Demo mode (synthetic records)
+**Key settings** (`backend/.env`, all documented in `.env.example`): `SECRET_KEY`, `APP_ENV`, `COOKIE_SECURE`, `DATABASE_URL`, `PERSON_MODEL_PATH`, `CAMERA_ALLOWED_NETWORKS`, `MAX_SIMULTANEOUS_STREAMS`, `SMTP_*`, `PUBLIC_BASE_URL`, `ML_*`, `DEPLOYMENT_MODE`, `SYNC_*`, `RATE_LIMIT_PER_MINUTE`. Production refuses to start with a weak `SECRET_KEY`, without `COOKIE_SECURE`, or with `DEBUG=True`.
+
+### Organizations, users and demo data
+
+```bash
+python manage.py list-orgs
+python manage.py create-org acme-retail "Acme Retail" --timezone Asia/Kolkata --plan standard --max-cameras 8
+python manage.py create-user priya --role admin --org acme-retail
+```
+
+A fresh install has one organization (`default`) with one location. Administrators add locations, cameras and users in **Settings**.
+
+Demo mode (synthetic, separate database, banner shown, never used for ML training):
+
+```bash
+set APP_ENV=demo && python manage.py seed-demo --days 14 && uvicorn main:app --port 8000
+```
+
+---
+
+## 3. Roles
+
+| Role | Can |
+|---|---|
+| **Viewer** | Overview, Reports (aggregate figures). No live video, images, logs or alert review. |
+| **Operator** | Everything a viewer can, plus live cameras, entry/exit logs, evidence, alert review, occupancy reconciliation. |
+| **Administrator** | Everything, plus settings, locations, cameras, zones, alert rules, notifications, schedules, the ML model, users, evidence deletion and the audit log. |
+
+Every API route checks the role on the server, and every record is scoped to the user's organization: another tenant's records answer **404**, exactly like missing ones. WebSocket messages are delivered only to the same organization.
+
+---
+
+## 4. Cameras
+
+Add cameras in **Settings → Cameras**, pick their location, then use **Live Cameras**.
+
+| Type | How frames arrive |
+|---|---|
+| Browser camera | A signed-in operator's browser (laptop webcam or a phone via `/streamer`, HTTPS required on phones). |
+| IP / CCTV | The backend opens `rtsp://`, `rtsps://` or `http(s)://` (MJPEG) with OpenCV/FFmpeg. |
+| USB on server | Device index `0`, `1`, … |
+| Test clip | A file in `backend/storage/test_videos/` (development; `ALLOW_FILE_SOURCES`). |
+
+- **Test connection** (camera dialog) checks DNS, TCP reachability and that a frame arrives, and explains common failures (wrong port, stream path, credentials, unsupported codec).
+- **Credentials**: prefer `env:CAMERA_GATE_URL` (URL kept in the server environment). Otherwise the URL is stored encrypted; it is never returned by the API, sent to the browser or logged; the UI shows `rtsp://***@host:port/path`.
+- **Network policy (SSRF protection)**: camera URLs must resolve inside `CAMERA_ALLOWED_NETWORKS` (private LAN ranges by default). Loopback, link-local (including cloud metadata `169.254.169.254`), multicast and reserved addresses are always refused. The check runs on save and again every time a worker opens the stream.
+- **Reliability**: capture reconnects with bounded exponential backoff (2 s → 30 s); a camera is *Live* only while frames arrive; outages are recorded as incidents, flag occupancy as estimated and raise a *Camera stream interrupted* alert after a grace period; the last error is kept for diagnostics. `MAX_SIMULTANEOUS_STREAMS` caps concurrent cameras per server.
+- **Zones**: administrators draw polygons on the live image. *Restricted* zones alert on any confirmed presence; *dwell* zones alert when someone stays longer than a threshold.
+- **Counting**: turn counting off for zone-only cameras. Use one counting camera per doorway.
+
+---
+
+## 5. Counting logic
+
+1. Each frame goes to YOLO (person class) with ByteTrack. Track IDs are temporary and per camera session.
+2. The counting line is drawn on the live image; the arrow points inside.
+3. A track must be confirmed on one side (outside a tolerance band, for `min_side_frames` frames), then on the other side, and its path must pass through the drawn segment: outside → inside = **entry**, inside → outside = **exit**. Appearing in view never creates an event.
+4. **Uncertain** events (reviewed, never counted): a track lost mid-crossing, or a direction reversal within the cooldown.
+5. Duplicate suppression: one event per crossing per track, per-track cooldown, and a second track on the same person at the same moment is dropped. Close groups are counted per track; heavily overlapping people can merge into one track (see limitations).
+6. Tracks expire after `track_timeout_seconds`; a disconnection drops all tracks, starts a new session and logs an incident.
+
+**Detection vs tracking vs identity.** A *detection* is one box in one frame. A *tracked person* is a sequence of detections the tracker links within one camera session. A *label* (`Unknown Person 07`) is assigned to a track when it first produces an event and is unique within the organization. None of these is an identity: the label is lost when the track ends.
+
+**Visits** pair an entry and exit only when the same track made both (or an operator links them). **Occupancy** per location = last head count + entries − exits ± adjustments since then, never below zero, flagged *estimated* with reasons after interruptions, restarts, exits at zero or unreviewed uncertain events. Operators reconcile from the Overview page; every change is audited.
+
+---
+
+## 6. Alerts
+
+Rules (Settings → Alert rules; enable/disable, severity, parameters, re-notification cooldown):
+
+| Rule | Triggered when |
+|---|---|
+| Restricted zone entry | a tracked person is confirmed inside a restricted zone (snapshot attached) |
+| Long presence in a zone | continuous presence exceeds the zone's dwell threshold (snapshot attached) |
+| Activity outside business hours | an entry/exit occurs outside the location's hours (with grace) |
+| Unusual entry/exit frequency | entries + exits on a camera exceed a threshold within a window |
+| Unexpected occupancy | estimated occupancy exceeds capacity, or changes by more than N within a window |
+| Repeated line crossings | one track crosses the line N times within a window |
+| Camera stream interrupted | a monitoring camera delivers no video beyond a grace period (auto-resolves) |
+| Camera view obstructed/degraded | sustained very dark, uniform (covered) or blurred image (auto-resolves) |
+| Processing or delivery problem | detection failing, events waiting for the database, or cloud sync delayed (auto-resolves) |
+| Unusual activity pattern | the Isolation Forest baseline scores an hour as an outlier (§7) |
+| Video anomaly | the trained altercation classifier, or the motion detector, confirms a detection over consecutive clips (§8) |
+
+**Deduplication**: while an alert with the same subject is open, new occurrences update it (count, last seen, latest metrics) instead of creating duplicates. Notifications are re-sent only after the rule's cooldown or when severity increases. **Review**: *new → acknowledged → resolved / dismissed* (dismissed = false positive), with notes, reviewer and audit history; closed alerts can be reopened.
+
+**Notifications** (Settings → Notifications): in-app is always on (real-time badge and Alerts page). Telegram (bot messages, optionally with the evidence photo), email (SMTP, optionally with the photo attached) and webhooks per organization; a single-business install can also set `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `ALERT_EMAIL_TO` in `.env`. Each channel has a minimum severity, optional categories, an hourly rate limit (excess = *suppressed*), retries with backoff (5 attempts) and a delivery log. Webhooks are signed: `X-VV-Signature: sha256=<HMAC-SHA256 of the body with the channel secret>`. Bot tokens, channel secrets and recipients are encrypted at rest and never returned. Images go out only on channels where an administrator ticked *Attach the evidence snapshot*; webhooks never carry images.
+
+---
+
+## 7. Unusual-pattern detection (Isolation Forest)
+
+A staged approach: rules first; then this optional statistical baseline; advanced temporal/video models only once enough representative data exists.
+
+- **Features (schema v1)**, one row per location per local hour: entries, exits, uncertain crossings, net flow, and cyclic hour-of-day / weekday encodings. Counts are standardised with the training mean/std stored with the model.
+- **Training** (Settings → Unusual patterns, or `python manage.py train-anomaly-model --org <slug>`) uses only real, non-demo, non-rejected events, and excludes hours overlapping a camera outage. It requires `ML_MIN_TRAINING_HOURS` (168) usable hours over `ML_MIN_TRAINING_DAYS` (7) days and 50 events; otherwise the run is recorded as *insufficient data* and no model is produced.
+- **Artifacts** are versioned in `MODEL_DIR/org_<id>/`, registered with their SHA-256, loaded only from inside `MODEL_DIR` and only if the hash matches (a tampered file disables the model). Only the last 3 artifacts are kept. joblib files are pickles: never copy model files from untrusted sources.
+- **Inference** runs hourly, separately from training; rows with missing/invalid features are skipped. Findings become **low**-severity alerts that explain the hour (e.g. "80 entries between 03:00 and 04:00, compared with about 0.4 in that hour in the training data") with the score and threshold.
+- **Evaluation**: the status page shows training-set flag rate and reviewer feedback (resolved vs dismissed) as a running false-positive estimate. Tune `contamination` when retraining.
+
+---
+
+## 8. Video anomaly detection (VIAHIND-FightClassifier-MobileNetV3)
+
+Enabled by default (`ANOMALY_DETECTION_ENABLED=True`). Each camera's frames are sampled into 16-frame clips and analysed in a separate thread with a bounded queue, so counting is never slowed down. A detection must repeat for `ANOMALY_MIN_CONSECUTIVE_CLIPS` (2) clips in a row before it becomes a **high**-severity *Video anomaly* alert with a snapshot. `VIDEO_ANOMALY_MODE` chooses the detector:
+
+| Mode | What it does |
+|---|---|
+| `auto` (default) | Uses the trained classifier when `FIGHT_MODEL_PATH` is set, otherwise the motion detector. |
+| `model` | Trained classifier only. Startup reports an error without weights. |
+| `motion` | Weight-free detector: **vigorous movement between people in close contact**, measured with optical flow in the area around tracked people and compared with motion elsewhere in the frame (ignores camera shake). It needs person detection, does not recognise fights, and can be triggered by hugging, play or crowding. |
+
+**Training the classifier** (MobileNetV3-Small per frame + feature differences + GRU, `backend/vision/fight_model.py`):
 
 ```bash
 cd backend
-set APP_ENV=demo                  # Linux/macOS: export APP_ENV=demo
-python manage.py seed-demo        # writes only to DEMO_DATABASE_URL
-uvicorn main:app --port 8000
+# folder with fight/ and nonfight/ (or violence/ and noviolence/) sub-folders of short videos, e.g. the RWF-2000 layout.
+# Use footage you are licensed to use.
+python manage.py train-fight-model --data D:/datasets/RWF-2000 --pretrained-backbone --device cuda:0
+# defaults: 15 epochs, batch 8, 4 decoding workers; RWF-2000's own train/val split is used when present
 ```
 
-The UI shows a "Demo mode" banner. Demo records have no photos, and `seed-demo` refuses to run outside `APP_ENV=demo`.
+On a dataset without its own split, the command holds out 20% of the videos (stratified). It reports accuracy, precision, recall and F1, chooses the decision threshold on the hold-out set (never below 0.5), and writes `storage/models/video/fight_classifier_<version>.pt` with a `.json` metadata file including its SHA-256. Set `FIGHT_MODEL_PATH` (and optionally `FIGHT_MODEL_SHA256`) and restart. Weights are loaded with `torch.load(weights_only=True)` after the hash check, so no pickled code runs. `--pretrained-backbone` downloads ImageNet MobileNetV3 weights once; inference never downloads anything. Settings → Video anomaly detection shows the mode, version, hold-out results and activity.
+
+A classifier score is a probability for review, not proof of an altercation; real cameras usually perform worse than the hold-out figures.
+
+## 9. Face recognition (not included)
+
+Cross-session identity recognition is **not implemented**. The product is designed to be useful without it. If it is ever added it must be a separately enabled, consent-based feature: enrolment only through an authorised workflow, comparison only against explicitly enrolled identities (never arbitrary members of the public), configurable thresholds with an *unverified* outcome, biometric templates stored separately and protected, consent/lawful-basis records with revocation and deletion, and no inference of identity, intent or suspiciousness from appearance. Check the applicable law first (in India, the Digital Personal Data Protection Act, 2023).
 
 ---
 
-## 3. Connecting cameras
+## 10. Security and privacy
 
-Add cameras in **Settings → Cameras** (administrators only), then use **Live Camera**.
+- **Sessions**: signed JWT in an `httpOnly`, `SameSite=Lax` cookie (`Secure` in production); state-changing requests need the `X-VV-CSRF` header; sign-ins are throttled; sessions end immediately on deactivation, role change or password reset.
+- **Tenant isolation** on every query and WebSocket; plan camera limits (`organizations.max_cameras`).
+- **Rate limiting**: per-address sliding window (`RATE_LIMIT_PER_MINUTE`, expensive endpoints cost more); put a proxy-level limit in front of multi-instance deployments.
+- **Headers**: `nosniff`, `X-Frame-Options: DENY`, CSP on API responses, HSTS when `COOKIE_SECURE`, `no-store` on API responses; API docs disabled in production.
+- **Evidence**: served only to operators/admins through authenticated routes with path-traversal protection; per-organization storage limits; retention (`snapshot_retention_days`); audited deletion by administrators; never sent to notification channels or the cloud.
+- **Secrets**: camera sources and integration secrets encrypted at rest (key derived from `SECRET_KEY`; rotating it requires re-entering them); never logged or returned.
+- **Audit log**: sign-ins, settings, cameras, zones, locations, users, rules, channels, schedules, ML training, event corrections, visit links, occupancy changes, alert reviews, exports, evidence deletion, retention runs.
+- **Retention** (hourly): snapshots, optional event expiry, closed alerts (`alert_retention_days`), old delivery/outbox rows.
+- **Backups**: back up the PostgreSQL database (`pg_dump`, daily, encrypted, off-site) and the `storage` volume (evidence images, model artifacts). Restore = database restore + volume restore; `SECRET_KEY` must be the same to decrypt stored camera sources and channel settings, so keep it in your secret manager.
 
-**Laptop or USB webcam (browser camera)**
-1. Add a camera of type *Browser camera*.
-2. Open **Live Camera**, select it and press **Start Camera**. The browser asks for camera permission at this point and not before.
-3. Capture continues while you move between pages. *Stop Camera* releases the webcam.
-
-**Phone at the entrance (browser camera)**
-1. Add a *Browser camera* and open `/streamer` on the phone (the Live Camera page links to it), sign in and press **Start**.
-2. Phones only allow camera access on **HTTPS** pages (`http://localhost` is the only exception). Serve the frontend over HTTPS on your LAN, for example behind a reverse proxy with a certificate, or with `npx next dev --experimental-https` for testing.
-3. In development, add the PC's LAN IP to `NEXT_DEV_ALLOWED_ORIGINS` and allow ports 3000/8000 in the firewall.
-
-**CCTV / DVR / IP camera (RTSP or HTTP)**
-1. Find the RTSP URL in the camera or DVR manual (e.g. `rtsp://user:pass@192.168.1.20:554/Streaming/Channels/101`).
-2. Prefer keeping credentials out of the database: put `CAMERA_GATE_URL=rtsp://…` in `backend/.env` and enter `env:CAMERA_GATE_URL` as the source.
-3. Otherwise the URL is stored **encrypted** (key derived from `SECRET_KEY`). It is never returned by the API, never sent to the browser and never logged. The UI shows only `rtsp://***@host:port/path`.
-4. The backend must be able to reach the camera. Do not expose camera streams to the internet.
-
-**Test clip**: put an `.mp4` in `backend/storage/test_videos/` and add a *Test clip* camera with the file name. Clips start playing once the detector has loaded.
+**Your obligations.** Use VIAHIND Vision only on cameras you are authorised to operate, display clear signage, limit access, keep retention short and follow applicable data-protection law.
 
 ---
 
-## 4. Entry/exit logic
-
-1. Each frame goes to YOLO (person class only) with ByteTrack tracking. Track IDs are per camera session.
-2. The operator draws the **entrance line** on the live image, and the arrow points **inside**.
-3. A track must be confirmed on one side (outside the tolerance band, for `min_side_frames` frames), then confirmed on the other side, *and* its path must pass through the drawn segment:
-   - outside → inside = **Entry**, inside → outside = **Exit**.
-   - A person merely appearing in the frame never creates an event, and jitter around the line is ignored.
-4. **Uncertain** events (shown for review, never counted):
-   - a track lost while half-way across the line (occlusion, leaving the frame),
-   - a direction reversal within the cooldown after an event.
-5. Duplicate suppression: one event per crossing per track, cooldown per track, and a second track on the same person crossing at the same moment is dropped.
-6. Tracks expire after `track_timeout_seconds`. When a camera disconnects, all tracks are dropped, a new session begins, and an interruption is logged.
-
-**Labels and visits.** The first event of a track gets the next site-wide pseudonymous label (`Unknown Person 01`, `02`, …). An entry opens a visit. An exit closes a visit **only** if the same track made the entry (tracker continuity). Any other exit is *Unmatched*: it still counts toward occupancy, but no visit is closed and no duration is shown until an operator links it. Events are never paired by time proximity. There is no facial recognition or biometric matching.
-
-**Occupancy** = last head count (reconciliation) + entries − exits ± manual adjustments since then, applied in time order and never below zero. Uncertain and rejected events don't count. The value is shown as **Estimated**, with reasons, after camera interruptions, service restarts, an exit at zero (a missed entry) or unreviewed uncertain events. Operators clear it with **Reconcile** on the Overview page. Reconciliations and adjustments are audited.
-
-### Testing entry and exit
-- **Live**: start a camera, draw the line across the doorway, walk through toward the arrow, then back. Check **Entry & Exit Logs**.
-- **Recorded**: use a *Test clip* camera with any doorway footage you are authorised to use.
-- **Automated**: see section 7. The tests use synthetic trajectories and frames, never real residents' footage.
-
----
-
-## 5. Existing anomaly-detection model
-
-The anomaly component in this repository is `backend/edge-agent/fight_detector.py` (`FightDetector.predict_clip`). It was not modified, retrained or duplicated.
-
-- **Connection point:** `backend/vision/anomaly.py` (`AnomalyDetectorAdapter`), which provides `initialize_anomaly_detector()`, `process_frame()`, `get_anomaly_events()` and `health_check()`.
-- It loads `FightDetector` from `edge-agent/`, receives sampled frames from every camera worker, builds clips (`ANOMALY_CLIP_LENGTH`), and runs inference in its **own thread with a bounded queue**. Clips are dropped, never queued, when inference is slow, so the camera feed and entry/exit tracking are never blocked.
-- Only outputs where the model reports `is_fight: true` above `FIGHT_CONFIDENCE_THRESHOLD` are stored (`anomaly_events` table, `GET /api/v1/anomaly/events`). Malformed outputs and inference errors produce an error status, not alerts.
-- **Current status:** `FightDetector.predict_clip` is a signature placeholder that always returns `is_fight: False`, and no model weights exist in the repository. The adapter therefore reports *"Model not connected"* when enabled. To connect the real model, load the weights in `FightDetector.__init__` (as `self.model`) and implement `predict_clip` with the same output format. Then set `ANOMALY_DETECTION_ENABLED=True`.
-- The previous phone-streamer button that broadcast a fabricated "Physical Altercation 94.2%" alert has been removed.
-
----
-
-## 6. Security and privacy
-
-- **Accounts**: administrators manage settings, cameras and accounts; operators monitor, review and reconcile. Every API route checks the role on the server.
-- **Sessions**: a signed JWT in an `httpOnly`, `SameSite=Lax` cookie (`Secure` when `COOKIE_SECURE=True`, which is required in production). State-changing requests also need an `X-VV-CSRF` header. Repeated failed sign-ins are throttled.
-- **WebSockets** require a valid session and a same-site `Origin`.
-- **Snapshots** are served only to signed-in users through `/api/v1/events/{id}/snapshot`, with `no-store` caching and path-traversal protection. Only event crops are stored, never continuous video.
-- **Camera credentials** are encrypted at rest or kept in environment variables, and are masked in all responses and logs.
-- **Audit log** covers event corrections, visit links, occupancy changes, camera and settings changes, user changes, sign-ins and CSV exports.
-- **Retention**: snapshots are deleted after `snapshot_retention_days` (default 30). Event records can also expire (`event_retention_days`). The job runs hourly.
-- **Production** refuses to start with a weak `SECRET_KEY` or without `COOKIE_SECURE`. Serve over **HTTPS** behind a reverse proxy, and never expose ports 8000 or camera streams publicly.
-
-**Your obligations.** Use VIAHIND Vision only on cameras you are authorised to operate. Inform residents and visitors with clear signage that the entrance is monitored and why. Limit access to people who need it. Keep retention as short as practical. Follow the data-protection law that applies to you (in India, the Digital Personal Data Protection Act, 2023). Person labels are pseudonymous; operators should add identifying notes only when there is a legitimate need.
-
----
-
-## 7. Tests
+## 11. Tests
 
 ```bash
-cd backend
-python -m pytest tests -q
+cd backend && python -m pytest tests -q
 # optional end-to-end check with the real detector (no real footage needed):
 VV_TEST_MODEL_PATH=/path/to/yolo11n.pt python -m pytest tests/test_yolo_integration.py
 
-cd frontend
-npm test
-npx tsc --noEmit
-npm run build
+cd frontend && npx tsc --noEmit && npm test && npm run build
 ```
 
-The backend tests cover entry/exit direction, hysteresis, duplicate suppression, track expiry, uncertain events, occupancy (including missed entries and reconciliation), visit matching and manual linking, corrections and rejections, database-failure retries, low storage, snapshot access control and path traversal, authorization and CSRF, WebSocket auth, camera disconnection and reconnection, unreachable sources, worker crashes, detector failures and the anomaly adapter (including the real `FightDetector` placeholder).
+CI (`.github/workflows/ci.yml`) runs the backend tests, migrations up/down/up on PostgreSQL 16, and the frontend typecheck, tests and build. Tests use synthetic fixtures only.
 
 ---
 
-## 8. Known limitations
+## 12. Known limitations
 
-- Re-identification across visits is intentionally not attempted. Most exits are *Unmatched* unless the same track is followed through the entry and exit, so visit durations exist only for reliably linked visits.
-- One backend process runs the camera workers. Running several API workers (e.g. `uvicorn --workers 4`) would start duplicate camera workers. Run one backend process per site, or split workers into a separate service.
-- CPU inference with `yolo11n` handles roughly 5–10 frames/s per camera. Use a GPU (`DETECTION_DEVICE=cuda:0`) for several cameras.
-- Multiple entrances: each camera counts its own line. Overlapping cameras looking at the same door would double-count; configure only one counting camera per doorway.
-- `docker-compose.yml` references Dockerfiles that do not exist yet.
+- **Occlusion and groups**: people walking very close together can merge into one track (undercount); long occlusions can split a track (possible uncertain events). Counts are estimates; reconcile occupancy with head counts.
+- **Multiple entrances**: every doorway needs its own counting camera; overlapping counting cameras on one door double-count; uncounted doors cause occupancy drift.
+- **Dwell times** restart when the tracker loses a person, so they are lower bounds.
+- **Visits** are linked only by tracker continuity or by an operator; most exits stay unmatched, so visit durations are indicative.
+- **One process per site** runs the camera workers; rate limiting is per process.
+- **CPU inference** with `yolo11n` handles roughly 5–10 frames/s per camera; use `DETECTION_DEVICE=cuda:0` for several cameras.
+- **Cloud sync** carries events (and corrections) only; alerts, zones and evidence stay at the edge. Camera IDs are unique across the whole installation.
+- **Timezone** is per organization, not per location.
+- **Billing** is limited to plan name and camera limit fields; no payment provider is integrated.

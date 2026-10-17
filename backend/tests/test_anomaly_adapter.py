@@ -30,13 +30,15 @@ def test_disabled_by_default_does_nothing():
     assert adapter.health_check()["status"] == "disabled" and events == []
 
 
-def test_existing_fight_detector_placeholder_produces_no_alerts():
-    """Loads the real edge-agent/fight_detector.py without modifying it."""
+def test_real_detector_without_weights_runs_motion_mode_and_stays_quiet_on_empty_frames():
+    """Loads the real edge-agent/fight_detector.py: no FIGHT_MODEL_PATH -> weight-free motion mode."""
     events = []
     adapter = AnomalyDetectorAdapter(on_event=events.append, enabled=True, sample_every_n_frames=1, clip_length=4)
     assert adapter.initialize_anomaly_detector() is True
     try:
-        assert adapter.health_check()["status"] == "placeholder"
+        health = adapter.health_check()
+        assert health["status"] == "motion" and health["mode"] == "motion"
+        assert "not fights" in health["message"]
         feed(adapter, 12)
         assert wait(lambda: adapter.processed_clips >= 1)
         assert events == []
@@ -82,7 +84,7 @@ def test_inference_failure_sets_error_and_creates_no_events():
 def test_only_real_positive_outputs_above_threshold_are_recorded():
     events = []
     output = {"is_fight": True, "confidence_score": 0.91, "threshold": 0.75}
-    adapter = AnomalyDetectorAdapter(events.append, enabled=True, detector_factory=lambda: Model(output=output), sample_every_n_frames=1, clip_length=2, threshold=0.75)
+    adapter = AnomalyDetectorAdapter(events.append, enabled=True, detector_factory=lambda: Model(output=output), sample_every_n_frames=1, clip_length=2, threshold=0.75, min_consecutive=1)
     adapter.initialize_anomaly_detector()
     try:
         feed(adapter, 2)
@@ -92,7 +94,7 @@ def test_only_real_positive_outputs_above_threshold_are_recorded():
         adapter.shutdown()
 
     low = []
-    adapter = AnomalyDetectorAdapter(low.append, enabled=True, detector_factory=lambda: Model(output={"is_fight": True, "confidence_score": 0.5}), sample_every_n_frames=1, clip_length=2, threshold=0.75)
+    adapter = AnomalyDetectorAdapter(low.append, enabled=True, detector_factory=lambda: Model(output={"is_fight": True, "confidence_score": 0.5}), sample_every_n_frames=1, clip_length=2, threshold=0.75, min_consecutive=1)
     adapter.initialize_anomaly_detector()
     try:
         feed(adapter, 2)

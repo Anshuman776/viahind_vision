@@ -9,7 +9,7 @@ from sqlalchemy.exc import OperationalError
 
 import db
 import services.events as events_module
-from models.entities import CameraIncident, DetectionEvent, User, Visit
+from models.entities import CameraIncident, DetectionEvent, Location, User, Visit
 from services import occupancy
 from services.events import EventRecorder, LinkError, link_exit_to_visit, unlink_exit, update_event
 from vision.line_crossing import CrossingEvent
@@ -41,7 +41,7 @@ def test_entry_creates_visit_with_new_label(recorder, camera):
     with db.session_scope() as s:
         visit = s.scalar(select(Visit))
         assert visit.status == "inside" and visit.person_label == "Unknown Person 01"
-        assert occupancy.compute_occupancy(s)["count"] == 1
+        assert occupancy.compute_occupancy(s, 1)["count"] == 1
 
 
 def test_labels_are_unique_and_sequential(recorder, camera):
@@ -70,7 +70,7 @@ def test_exit_by_same_track_closes_visit(recorder, camera):
         visit = s.scalar(select(Visit))
         assert visit.status == "exited" and visit.match_method == "tracker"
         assert (visit.exit_at - visit.entry_at) == timedelta(seconds=90)
-        assert occupancy.compute_occupancy(s)["count"] == 0
+        assert occupancy.compute_occupancy(s, 1)["count"] == 0
 
 
 def test_exit_without_continuity_is_unmatched_and_does_not_close_visits(recorder, camera):
@@ -81,13 +81,13 @@ def test_exit_without_continuity_is_unmatched_and_does_not_close_visits(recorder
     assert payload["person_label"] == "Unknown Person 02"
     with db.session_scope() as s:
         assert s.scalar(select(Visit)).status == "inside"  # never paired just by time
-        assert occupancy.compute_occupancy(s)["count"] == 0  # the exit still counts
+        assert occupancy.compute_occupancy(s, 1)["count"] == 0  # the exit still counts
 
 
 def test_occupancy_never_negative_and_flags_missed_entry(recorder, camera):
     recorder.record(camera, SESSION, crossing("exit", 1), None)
     with db.session_scope() as s:
-        occ = occupancy.compute_occupancy(s)
+        occ = occupancy.compute_occupancy(s, 1)
     assert occ["count"] == 0
     assert occ["estimated"] is True
     assert "missed" in occ["reasons"][0]
@@ -98,7 +98,7 @@ def test_uncertain_events_do_not_count_and_mark_estimate(recorder, camera):
     payload = recorder.record(camera, SESSION, crossing("uncertain", 2, reason="lost_while_crossing"), None)
     assert payload["review_status"] == "needs_review"
     with db.session_scope() as s:
-        occ = occupancy.compute_occupancy(s)
+        occ = occupancy.compute_occupancy(s, 1)
     assert occ["count"] == 1 and occ["estimated"] is True
 
 
@@ -106,19 +106,19 @@ def test_reconcile_sets_baseline_and_clears_estimate(recorder, camera):
     recorder.record(camera, SESSION, crossing("exit", 1, time.time() - 60), None)
     user = operator()
     with db.session_scope() as s:
-        occupancy.reconcile(s, user, 3, "Head count at night roll call")
+        occupancy.reconcile(s, user, s.get(Location, 1), 3, "Head count at night roll call")
     recorder.record(camera, SESSION, crossing("entry", 2), None)
     with db.session_scope() as s:
-        occ = occupancy.compute_occupancy(s)
+        occ = occupancy.compute_occupancy(s, 1)
     assert occ["count"] == 4 and occ["estimated"] is False
 
 
 def test_manual_adjustment_counts_and_is_audited(recorder, camera):
     user = operator()
     with db.session_scope() as s:
-        occupancy.adjust(s, user, 2, "Two residents entered through the side gate")
+        occupancy.adjust(s, user, s.get(Location, 1), 2, "Two residents entered through the side gate")
     with db.session_scope() as s:
-        assert occupancy.compute_occupancy(s)["count"] == 2
+        assert occupancy.compute_occupancy(s, 1)["count"] == 2
         from models.entities import AuditLog
 
         assert s.scalar(select(AuditLog).where(AuditLog.action == "occupancy.adjust")) is not None
@@ -126,8 +126,8 @@ def test_manual_adjustment_counts_and_is_audited(recorder, camera):
 
 def test_camera_interruption_marks_estimate(recorder, camera):
     with db.session_scope() as s:
-        s.add(CameraIncident(camera_id=camera, kind="disconnected", message="No frames"))
-        occ = occupancy.compute_occupancy(s)
+        s.add(CameraIncident(organization_id=1, camera_id=camera, kind="disconnected", message="No frames"))
+        occ = occupancy.compute_occupancy(s, 1)
     assert occ["estimated"] is True and "interruption" in occ["reasons"][0]
 
 
@@ -141,7 +141,7 @@ def test_correcting_uncertain_to_entry_opens_visit(recorder, camera):
         event = s.get(DetectionEvent, payload["id"])
         assert event.review_status == "corrected" and event.original_event_type == "uncertain"
         assert s.get(Visit, event.visit_id).status == "inside"
-        assert occupancy.compute_occupancy(s)["count"] == 1
+        assert occupancy.compute_occupancy(s, 1)["count"] == 1
 
 
 def test_rejecting_entry_voids_visit_and_restores_count(recorder, camera):
@@ -151,7 +151,7 @@ def test_rejecting_entry_voids_visit_and_restores_count(recorder, camera):
         update_event(s, s.get(DetectionEvent, payload["id"]), user, review_status="rejected")
     with db.session_scope() as s:
         assert s.scalar(select(Visit)).status == "voided"
-        assert occupancy.compute_occupancy(s)["count"] == 0
+        assert occupancy.compute_occupancy(s, 1)["count"] == 0
 
 
 def test_rejecting_matched_exit_reopens_visit(recorder, camera):

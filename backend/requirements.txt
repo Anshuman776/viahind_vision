@@ -5,7 +5,6 @@ python-dotenv>=1.0.1
 python-multipart>=0.0.9
 websockets>=12.0
 httpx>=0.27.0
-pytest>=8.2.0
 
 # Persistence, migrations and auth
 SQLAlchemy>=2.0.30
@@ -20,3 +19,10 @@ numpy>=1.26
 opencv-python>=4.8
 ultralytics>=8.3        # model weights are NOT downloaded; set PERSON_MODEL_PATH
 lap>=0.5.12             # required by ByteTrack
+
+# PostgreSQL driver (production). SQLite needs nothing extra.
+psycopg[binary]>=3.1
+
+# Event-level anomaly baseline (Isolation Forest). Optional: without it the rules engine still works.
+scikit-learn>=1.4
+joblib>=1.3

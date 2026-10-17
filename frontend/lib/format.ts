@@ -82,3 +82,68 @@ export const SOURCE_LABELS: Record<string, string> = {
   network: 'IP / CCTV (RTSP or HTTP)',
   file: 'Test clip',
 };
+
+export const SEVERITY_LABELS: Record<string, string> = {
+  info: 'Info',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  critical: 'Critical',
+};
+
+export const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'] as const;
+
+export const ALERT_STATUS_LABELS: Record<string, string> = {
+  new: 'New',
+  acknowledged: 'Acknowledged',
+  resolved: 'Resolved',
+  dismissed: 'Dismissed',
+};
+
+export const CATEGORY_LABELS: Record<string, string> = {
+  zone: 'Zones',
+  operations: 'Business hours',
+  traffic: 'Traffic',
+  occupancy: 'Occupancy',
+  movement: 'Movement',
+  camera_health: 'Camera health',
+  system: 'System',
+  pattern: 'Unusual pattern (ML)',
+  video_model: 'Video model',
+};
+
+/** "+12.5%" / "-3%" / "no earlier data" for a period-over-period change. */
+export function formatChange(pct: number | null | undefined): string {
+  if (pct === null || pct === undefined) return 'no earlier data';
+  if (pct === 0) return 'no change';
+  return `${pct > 0 ? '+' : ''}${Number.isInteger(pct) ? pct : pct.toFixed(1)}%`;
+}
+
+export function hourRange(h: number): string {
+  const f = (x: number) => `${String(x % 24).padStart(2, '0')}:00`;
+  return `${f(h)}–${f(h + 1)}`;
+}
+
+export const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+/** Inclusive YYYY-MM-DD range for a named preset, relative to the business's local "today". */
+export function presetRange(preset: 'today' | 'yesterday' | '7d' | '30d' | 'month' | 'last_month', today: string): [string, string] {
+  const [y, m, d] = today.split('-').map(Number);
+  const base = new Date(Date.UTC(y, m - 1, d));
+  const iso = (dt: Date) => dt.toISOString().slice(0, 10);
+  const shift = (days: number) => new Date(base.getTime() + days * 86400000);
+  switch (preset) {
+    case 'today':
+      return [today, today];
+    case 'yesterday':
+      return [iso(shift(-1)), iso(shift(-1))];
+    case '7d':
+      return [iso(shift(-6)), today];
+    case '30d':
+      return [iso(shift(-29)), today];
+    case 'month':
+      return [iso(new Date(Date.UTC(y, m - 1, 1))), today];
+    case 'last_month':
+      return [iso(new Date(Date.UTC(y, m - 2, 1))), iso(new Date(Date.UTC(y, m - 1, 0)))];
+  }
+}

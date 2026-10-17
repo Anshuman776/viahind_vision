@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: viahind_ci
+          POSTGRES_USER: viahind
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U viahind -d viahind_ci" --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+      - name: Install dependencies (detector weights are not needed for tests)
+        run: |
+          grep -vE "^(ultralytics|lap)" requirements.txt > /tmp/req.txt
+          pip install -r /tmp/req.txt pytest
+      - name: Unit and API tests (SQLite)
+        run: python -m pytest tests -q
+      - name: Migrations on PostgreSQL (upgrade, downgrade, upgrade)
+        env:
+          DATABASE_URL: postgresql+psycopg://viahind:ci-only-password@localhost:5432/viahind_ci
+          SECRET_KEY: ci-only-secret-key-0123456789abcdef0123
+        run: |
+          alembic upgrade head
+          alembic downgrade 0001
+          alembic upgrade head
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci --legacy-peer-deps
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm run build

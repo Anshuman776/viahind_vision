@@ -1,9 +1,10 @@
-"""Site settings: the single operational settings record and derived detection parameters."""
+"""Organization settings: the operational settings record and derived detection parameters."""
 
 from datetime import datetime, time, timedelta
 from typing import Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -11,12 +12,12 @@ from models.entities import SiteSettings
 from vision.line_crossing import CrossingParams
 
 
-def get_site_settings(db: Session) -> SiteSettings:
-    row = db.get(SiteSettings, 1)
+def get_site_settings(db: Session, organization_id: int) -> SiteSettings:
+    row = db.scalar(select(SiteSettings).where(SiteSettings.organization_id == organization_id))
     if row is None:
-        row = SiteSettings(id=1, site_name=settings.ACTIVE_FACILITY_NAME, timezone=_valid_tz(settings.SITE_TIMEZONE))
+        row = SiteSettings(organization_id=organization_id, site_name=settings.ACTIVE_FACILITY_NAME, timezone=_valid_tz(settings.SITE_TIMEZONE))
         db.add(row)
-        db.commit()
+        db.flush()
     return row
 
 
@@ -59,9 +60,9 @@ def format_person_label(number: int) -> str:
     return f"Unknown Person {number:02d}"
 
 
-def allocate_person_label(db: Session) -> str:
-    """Next pseudonymous label, unique within the site. Caller commits."""
-    row = get_site_settings(db)
+def allocate_person_label(db: Session, organization_id: int) -> str:
+    """Next pseudonymous label, unique within the organization. Caller commits."""
+    row = get_site_settings(db, organization_id)
     number = row.next_person_number
     row.next_person_number = number + 1
     return format_person_label(number)

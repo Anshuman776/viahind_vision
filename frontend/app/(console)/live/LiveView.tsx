@@ -2,22 +2,24 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { ArrowLeftRight, CircleAlert, Pencil, Play, RefreshCw, Smartphone, Square, TriangleAlert } from 'lucide-react';
+import { ArrowLeftRight, CircleAlert, Hexagon, Pencil, Play, RefreshCw, Smartphone, Square, Trash2, TriangleAlert } from 'lucide-react';
 import { api } from '@/lib/api';
-import { formatAgo, formatDateTime, SOURCE_LABELS } from '@/lib/format';
+import { formatAgo, formatDateTime, formatDuration, SOURCE_LABELS } from '@/lib/format';
 import { lineLength, type Point } from '@/lib/geometry';
 import type { Camera, EntranceLine } from '@/lib/types';
 import { useSystem } from '@/components/SystemProvider';
 import { useCapture } from '@/components/CaptureProvider';
 import { CameraStatusBadge } from '@/components/Status';
-import { LiveFeed } from '@/components/LiveFeed';
+import { LiveFeed, ZONE_COLORS } from '@/components/LiveFeed';
+import { useSession } from '@/components/SessionProvider';
+import { Dialog } from '@/components/Dialog';
 
 const DETECTION_LABELS: Record<string, string> = {
   off: 'Off',
   unavailable: 'Unavailable',
   loading: 'Loading model…',
-  active: 'Counting entries and exits',
-  no_line: 'Detecting people (line not set)',
+  active: 'Detecting and counting',
+  no_line: 'Detecting people (no counting line)',
   error: 'Error',
 };
 
@@ -184,6 +186,21 @@ export default function LiveView() {
               <dd>{status === 'live' ? camera.runtime.tracked_people : '—'}</dd>
               <dt>Events this session</dt>
               <dd>{camera.runtime.events_recorded}</dd>
+              {camera.runtime.quality && status === 'live' && (
+                <>
+                  <dt>Image</dt>
+                  <dd className="small">
+                    brightness {Math.round(camera.runtime.quality.brightness)} · contrast {Math.round(camera.runtime.quality.contrast)} · sharpness{' '}
+                    {Math.round(camera.runtime.quality.sharpness)}
+                  </dd>
+                </>
+              )}
+              {camera.last_error && status !== 'live' && (
+                <>
+                  <dt>Last error</dt>
+                  <dd className="small">{camera.last_error}</dd>
+                </>
+              )}
             </dl>
 
             {camera.runtime.detection_message && camera.runtime.detection_status !== 'active' && (
@@ -204,6 +221,8 @@ export default function LiveView() {
                 </Link>
               </div>
             )}
+
+            <ZonesPanel camera={camera} />
 
             <div>
               <p className="section-title">Testing entry and exit</p>
@@ -226,14 +245,60 @@ function PageHead({ children }: { children?: React.ReactNode }) {
     <div className="page-head">
       <div>
         <h1>Live Camera</h1>
-        <p>Video shown here is what the server receives. A camera is Live only while frames arrive.</p>
+        <p>Video shown here is what the server receives. A camera is Live only while frames arrive. Boxes show detections; labels are temporary tracking IDs, not identities.</p>
       </div>
       {children}
     </div>
   );
 }
 
+function ZonesPanel({ camera }: { camera: Camera }) {
+  const { isAdmin } = useSession();
+  const { refreshCameras } = useSystem();
+  const [error, setError] = useState<string | null>(null);
+  const remove = async (id: number, name: string) => {
+    if (!window.confirm(`Delete zone "${name}"?`)) return;
+    try {
+      await api(`/cameras/${encodeURIComponent(camera.id)}/zones/${id}`, { method: 'DELETE' });
+      await refreshCameras();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+  return (
+    <div>
+      <p className="section-title">Zones</p>
+      {camera.zones.length === 0 ? (
+        <p className="muted small">No zones. {isAdmin ? 'Use “Draw zone” under the video to watch an area.' : 'An administrator can add zones.'}</p>
+      ) : (
+        <ul className="zone-list">
+          {camera.zones.map((z) => (
+            <li key={z.id}>
+              <span className="zone-swatch" style={{ background: ZONE_COLORS[z.kind] }} aria-hidden="true" />
+              <span style={{ flex: 1 }}>
+                <strong>{z.name}</strong>{' '}
+                <span className="muted small">{z.kind === 'restricted' ? 'Restricted: any presence alerts' : `Alerts after ${formatDuration(z.dwell_seconds)}`}</span>
+              </span>
+              {isAdmin && (
+                <button type="button" className="btn btn-ghost btn-icon btn-sm" aria-label={`Delete zone ${z.name}`} onClick={() => remove(z.id, z.name)}>
+                  <Trash2 size={13} />
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="small" style={{ color: 'var(--err)' }}>{error}</p>}
+    </div>
+  );
+}
+
 function LineEditorAndFeed({ camera, timezone, onSaved }: { camera: Camera; timezone: string; onSaved: () => Promise<void> }) {
+  const { isAdmin } = useSession();
+  const [zoneMode, setZoneMode] = useState(false);
+  const [zonePoints, setZonePoints] = useState<Point[]>([]);
+  const [zoneDialog, setZoneDialog] = useState(false);
+  const [zoneForm, setZoneForm] = useState({ name: '', kind: 'restricted' as 'restricted' | 'monitored', dwell: '5' });
   const [editing, setEditing] = useState(false);
   const [points, setPoints] = useState<Point[]>([]);
   const [side, setSide] = useState<1 | -1>(camera.line?.entry_side ?? 1);
@@ -243,8 +308,35 @@ function LineEditorAndFeed({ camera, timezone, onSaved }: { camera: Camera; time
   useEffect(() => {
     setEditing(false);
     setPoints([]);
+    setZoneMode(false);
+    setZonePoints([]);
     setError(null);
   }, [camera.id]);
+
+  const saveZone = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await api(`/cameras/${encodeURIComponent(camera.id)}/zones`, {
+        method: 'POST',
+        body: {
+          name: zoneForm.name,
+          kind: zoneForm.kind,
+          polygon: zonePoints.map((p) => [p.x, p.y]),
+          dwell_seconds: zoneForm.kind === 'monitored' ? Number(zoneForm.dwell) * 60 : null,
+        },
+      });
+      await onSaved();
+      setZoneDialog(false);
+      setZoneMode(false);
+      setZonePoints([]);
+    } catch (err) {
+      setError((err as Error).message);
+      setZoneDialog(false);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const draft: EntranceLine | null =
     points.length === 2 ? { x1: points[0].x, y1: points[0].y, x2: points[1].x, y2: points[1].y, entry_side: side } : null;
@@ -293,14 +385,38 @@ function LineEditorAndFeed({ camera, timezone, onSaved }: { camera: Camera; time
 
   return (
     <div style={{ display: 'grid', gap: 12 }}>
-      <LiveFeed camera={camera} timezone={timezone} onPick={editing ? pick : undefined} draftLine={editing ? draft : undefined} draftPoints={editing ? points : undefined} />
+      <LiveFeed
+        camera={camera}
+        timezone={timezone}
+        onPick={editing ? pick : zoneMode ? (p) => setZonePoints((prev) => (prev.length >= 32 ? prev : [...prev, p])) : undefined}
+        draftLine={editing ? draft : undefined}
+        draftPoints={editing ? points : undefined}
+        draftPolygon={zoneMode ? zonePoints : undefined}
+      />
       <div className="control-row" style={{ justifyContent: 'space-between' }}>
-        {editing ? (
+        {zoneMode ? (
+          <>
+            <span className="small muted" role="status">
+              Click the corners of the area to watch ({zonePoints.length} point{zonePoints.length === 1 ? '' : 's'}; at least 3).
+            </span>
+            <div className="control-row">
+              <button type="button" className="btn" onClick={() => setZonePoints((p) => p.slice(0, -1))} disabled={zonePoints.length === 0}>
+                Undo point
+              </button>
+              <button type="button" className="btn" onClick={() => { setZoneMode(false); setZonePoints([]); }}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-primary" disabled={zonePoints.length < 3} onClick={() => { setZoneForm({ name: '', kind: 'restricted', dwell: '5' }); setZoneDialog(true); }}>
+                Next
+              </button>
+            </div>
+          </>
+        ) : editing ? (
           <>
             <span className="small muted" role="status">
               {points.length < 2
                 ? `Click ${points.length === 0 ? 'the first' : 'the second'} end of the entrance line on the video.`
-                : 'The arrow must point into the PG. Flip it if needed, then save.'}
+                : 'The arrow must point into the premises. Flip it if needed, then save.'}
             </span>
             <div className="control-row">
               <button type="button" className="btn" onClick={() => setSide((s) => (s === 1 ? -1 : 1))} disabled={!draft}>
@@ -317,7 +433,11 @@ function LineEditorAndFeed({ camera, timezone, onSaved }: { camera: Camera; time
         ) : (
           <>
             <span className="small muted">
-              {camera.line ? 'Entrance line set. People crossing toward the arrow are recorded as entries.' : 'No entrance line yet: people are detected but not counted.'}
+              {!camera.counting_enabled
+                ? 'Counting is turned off for this camera (zone monitoring only).'
+                : camera.line
+                  ? 'Counting line set. People crossing toward the arrow are recorded as entries.'
+                  : 'No counting line yet: people are detected but not counted.'}
             </span>
             <div className="control-row">
               {camera.line && (
@@ -326,8 +446,13 @@ function LineEditorAndFeed({ camera, timezone, onSaved }: { camera: Camera; time
                 </button>
               )}
               <button type="button" className="btn" onClick={begin} disabled={camera.runtime.status !== 'live'} title={camera.runtime.status !== 'live' ? 'Start the camera to draw on the live image' : undefined}>
-                <Pencil size={14} /> {camera.line ? 'Redraw line' : 'Draw entrance line'}
+                <Pencil size={14} /> {camera.line ? 'Redraw line' : 'Draw counting line'}
               </button>
+              {isAdmin && (
+                <button type="button" className="btn" onClick={() => { setZoneMode(true); setZonePoints([]); }} disabled={camera.runtime.status !== 'live'} title={camera.runtime.status !== 'live' ? 'Start the camera to draw on the live image' : undefined}>
+                  <Hexagon size={14} /> Draw zone
+                </button>
+              )}
             </div>
           </>
         )}
@@ -337,6 +462,43 @@ function LineEditorAndFeed({ camera, timezone, onSaved }: { camera: Camera; time
           {error}
         </div>
       )}
+      <Dialog
+        open={zoneDialog}
+        title="New zone"
+        onClose={() => setZoneDialog(false)}
+        footer={
+          <>
+            <button type="button" className="btn" onClick={() => setZoneDialog(false)}>
+              Back
+            </button>
+            <button type="button" className="btn btn-primary" onClick={saveZone} disabled={saving || !zoneForm.name.trim()}>
+              Save zone
+            </button>
+          </>
+        }
+      >
+        <div className="field">
+          <label htmlFor="z-name">Name</label>
+          <input id="z-name" className="input" maxLength={80} value={zoneForm.name} placeholder="Stock room door" onChange={(e) => setZoneForm({ ...zoneForm, name: e.target.value })} />
+        </div>
+        <div className="segmented" role="group" aria-label="Zone type">
+          <button type="button" aria-pressed={zoneForm.kind === 'restricted'} onClick={() => setZoneForm({ ...zoneForm, kind: 'restricted' })}>
+            Restricted
+          </button>
+          <button type="button" aria-pressed={zoneForm.kind === 'monitored'} onClick={() => setZoneForm({ ...zoneForm, kind: 'monitored' })}>
+            Dwell time
+          </button>
+        </div>
+        {zoneForm.kind === 'restricted' ? (
+          <p className="field-hint">Any person confirmed inside this area raises an alert (with a snapshot) for review.</p>
+        ) : (
+          <div className="field">
+            <label htmlFor="z-dwell">Alert when someone stays longer than (minutes)</label>
+            <input id="z-dwell" className="input" type="number" min={1} max={1440} value={zoneForm.dwell} onChange={(e) => setZoneForm({ ...zoneForm, dwell: e.target.value })} />
+            <span className="field-hint">Dwell restarts if the tracker loses the person (occlusion), so real times can be longer.</span>
+          </div>
+        )}
+      </Dialog>
     </div>
   );
 }

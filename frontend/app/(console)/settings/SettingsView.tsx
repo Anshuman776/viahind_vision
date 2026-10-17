@@ -9,14 +9,22 @@ import { useSession } from '@/components/SessionProvider';
 import { useSystem } from '@/components/SystemProvider';
 import { CameraStatusBadge } from '@/components/Status';
 import { Dialog } from '@/components/Dialog';
+import { AlertRulesSection, AnomalyModelSection, EvidenceSection, LocationsSection, NotificationsSection, SchedulesSection, VideoAnomalySection } from './BusinessSettings';
 
-const SECTIONS = [
-  ['site', 'Site'],
-  ['detection', 'Detection & tracking'],
-  ['retention', 'Data retention'],
-  ['cameras', 'Cameras'],
-  ['operators', 'Operator accounts'],
-  ['integrations', 'Integrations'],
+const SECTIONS: [string, string, 'all' | 'admin'][] = [
+  ['site', 'Business', 'all'],
+  ['locations', 'Locations', 'all'],
+  ['cameras', 'Cameras', 'all'],
+  ['detection', 'Detection & tracking', 'all'],
+  ['evidence', 'Event evidence', 'admin'],
+  ['retention', 'Data retention', 'all'],
+  ['alert-rules', 'Alert rules', 'admin'],
+  ['notifications', 'Notifications', 'admin'],
+  ['schedules', 'Scheduled reports', 'admin'],
+  ['anomaly-model', 'Unusual patterns (ML)', 'admin'],
+  ['video-anomaly', 'Video anomaly detection', 'admin'],
+  ['operators', 'User accounts', 'admin'],
+  ['integrations', 'System status', 'admin'],
 ];
 
 const TIMEZONES = ['Asia/Kolkata', 'Asia/Dubai', 'Asia/Singapore', 'Europe/London', 'UTC', 'America/New_York'];
@@ -37,7 +45,7 @@ export default function SettingsView() {
       </div>
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="Settings sections">
-          {SECTIONS.map(([id, label]) => (
+          {SECTIONS.filter(([, , who]) => who === 'all' || isAdmin).map(([id, label]) => (
             <a key={id} href={`#${id}`}>
               {label}
             </a>
@@ -45,11 +53,22 @@ export default function SettingsView() {
         </nav>
         <div className="settings-sections">
           <SiteSection site={settings.site} editable={isAdmin} onSaved={refreshSettings} />
+          <LocationsSection editable={isAdmin} />
+          <CamerasSection editable={isAdmin} fileSourcesAllowed={settings.system.file_sources_allowed ?? false} testVideoDir={settings.system.test_video_dir ?? 'test_videos'} />
           <DetectionSection site={settings.site} editable={isAdmin} onSaved={refreshSettings} />
+          {isAdmin && <EvidenceSection site={settings.site} editable={isAdmin} usedMb={settings.system.storage?.evidence_used_mb} onSaved={refreshSettings} />}
           <RetentionSection site={settings.site} editable={isAdmin} onSaved={refreshSettings} />
-          <CamerasSection editable={isAdmin} fileSourcesAllowed={settings.system.file_sources_allowed} testVideoDir={settings.system.test_video_dir} />
-          {isAdmin && <OperatorsSection />}
-          <IntegrationsSection />
+          {isAdmin && (
+            <>
+              <AlertRulesSection />
+              <NotificationsSection emailConfigured={settings.system.email_configured ?? false} />
+              <SchedulesSection />
+              <AnomalyModelSection />
+              <VideoAnomalySection />
+              <OperatorsSection />
+              <IntegrationsSection />
+            </>
+          )}
         </div>
       </div>
     </>
@@ -148,10 +167,10 @@ function SiteSection({ site, editable, onSaved }: { site: SiteSettings; editable
   const f = useSettingsForm(site, onSaved);
   const zones = TIMEZONES.includes(f.form.timezone) ? TIMEZONES : [f.form.timezone, ...TIMEZONES];
   return (
-    <Section id="site" title="Site">
+    <Section id="site" title="Business">
       <div className="form-grid">
         <div className="field">
-          <label htmlFor="site-name">PG / site name</label>
+          <label htmlFor="site-name">Business name</label>
           <input id="site-name" className="input" value={f.form.site_name} disabled={!editable} maxLength={120} onChange={(e) => f.setForm({ ...f.form, site_name: e.target.value })} />
         </div>
         <div className="field">
@@ -240,12 +259,22 @@ interface CameraForm {
   source: string;
   enabled: boolean;
   detection_enabled: boolean;
+  counting_enabled: boolean;
+  location_id: string;
 }
 
-const EMPTY_CAMERA: CameraForm = { id: '', name: '', location: '', source_type: 'browser', source: '', enabled: true, detection_enabled: true };
+const EMPTY_CAMERA: CameraForm = { id: '', name: '', location: '', source_type: 'browser', source: '', enabled: true, detection_enabled: true, counting_enabled: true, location_id: '' };
+
+interface TestResult {
+  ok: boolean;
+  message: string;
+  steps: { step: string; ok: boolean; message: string }[];
+}
 
 function CamerasSection({ editable, fileSourcesAllowed, testVideoDir }: { editable: boolean; fileSourcesAllowed: boolean; testVideoDir: string }) {
-  const { cameras, refreshCameras } = useSystem();
+  const { cameras, refreshCameras, locations, refreshLocations } = useSystem();
+  const [test, setTest] = useState<TestResult | null>(null);
+  const [testing, setTesting] = useState(false);
   const [editing, setEditing] = useState<Camera | null>(null);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<CameraForm>(EMPTY_CAMERA);
@@ -254,14 +283,16 @@ function CamerasSection({ editable, fileSourcesAllowed, testVideoDir }: { editab
 
   const openNew = () => {
     setEditing(null);
-    setForm(EMPTY_CAMERA);
+    setForm({ ...EMPTY_CAMERA, location_id: locations[0] ? String(locations[0].id) : '' });
     setError(null);
+    setTest(null);
     setOpen(true);
   };
   const openEdit = (c: Camera) => {
     setEditing(c);
-    setForm({ id: c.id, name: c.name, location: c.location, source_type: c.source_type, source: '', enabled: c.enabled, detection_enabled: c.detection_enabled });
+    setForm({ id: c.id, name: c.name, location: c.location, source_type: c.source_type, source: '', enabled: c.enabled, detection_enabled: c.detection_enabled, counting_enabled: c.counting_enabled, location_id: String(c.location_id) });
     setError(null);
+    setTest(null);
     setOpen(true);
   };
 
@@ -270,19 +301,39 @@ function CamerasSection({ editable, fileSourcesAllowed, testVideoDir }: { editab
     setError(null);
     try {
       if (editing) {
-        const body: Record<string, unknown> = { name: form.name, location: form.location, enabled: form.enabled, detection_enabled: form.detection_enabled };
+        const body: Record<string, unknown> = {
+          name: form.name, location: form.location, enabled: form.enabled, detection_enabled: form.detection_enabled,
+          counting_enabled: form.counting_enabled, location_id: form.location_id ? Number(form.location_id) : undefined,
+        };
         if (form.source_type !== editing.source_type) body.source_type = form.source_type;
         if (form.source.trim()) body.source = form.source.trim();
         await api(`/cameras/${encodeURIComponent(editing.id)}`, { method: 'PATCH', body });
       } else {
-        await api('/cameras', { method: 'POST', body: { ...form, source: form.source.trim() || null } });
+        await api('/cameras', { method: 'POST', body: { ...form, source: form.source.trim() || null, location_id: form.location_id ? Number(form.location_id) : null } });
       }
       await refreshCameras();
+      await refreshLocations();
       setOpen(false);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const runTest = async () => {
+    setTesting(true);
+    setTest(null);
+    try {
+      if (form.source.trim() && form.source_type !== 'browser') {
+        setTest(await api<TestResult>('/cameras/test-source', { method: 'POST', body: { source_type: form.source_type, source: form.source.trim() } }));
+      } else if (editing) {
+        setTest(await api<TestResult>(`/cameras/${encodeURIComponent(editing.id)}/test`, { method: 'POST' }));
+      }
+    } catch (err) {
+      setTest({ ok: false, message: (err as Error).message, steps: [] });
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -321,6 +372,7 @@ function CamerasSection({ editable, fileSourcesAllowed, testVideoDir }: { editab
               <tr>
                 <th>Name</th>
                 <th>Type</th>
+                {locations.length > 1 && <th>Location</th>}
                 <th>Source</th>
                 <th>Entrance line</th>
                 <th>Status</th>
@@ -339,10 +391,12 @@ function CamerasSection({ editable, fileSourcesAllowed, testVideoDir }: { editab
                     <div className="small muted mono">{c.id}</div>
                   </td>
                   <td>{SOURCE_LABELS[c.source_type]}</td>
+                  {locations.length > 1 && <td>{locations.find((l) => l.id === c.location_id)?.name ?? '—'}</td>}
                   <td className="small" style={{ maxWidth: 260 }}>
-                    {c.source_description}
+                    {c.source_description ?? '—'}
+                    {c.last_error && c.runtime.status !== 'live' && <div className="muted">Last error: {c.last_error}</div>}
                   </td>
-                  <td>{c.line ? 'Configured' : <span className="badge badge-warn">Not set</span>}</td>
+                  <td>{!c.counting_enabled ? <span className="badge">Counting off</span> : c.line ? 'Configured' : <span className="badge badge-warn">Not set</span>}</td>
                   <td>{c.enabled ? <CameraStatusBadge status={c.runtime.status} /> : <span className="badge">Disabled</span>}</td>
                   {editable && (
                     <td style={{ textAlign: 'right' }}>
@@ -396,8 +450,18 @@ function CamerasSection({ editable, fileSourcesAllowed, testVideoDir }: { editab
           <input id="c-name" className="input" value={form.name} maxLength={120} placeholder="Main entrance" onChange={(e) => setForm({ ...form, name: e.target.value })} />
         </div>
         <div className="field">
-          <label htmlFor="c-loc">Location</label>
-          <input id="c-loc" className="input" value={form.location} maxLength={160} placeholder="Ground floor gate" onChange={(e) => setForm({ ...form, location: e.target.value })} />
+          <label htmlFor="c-site">Location</label>
+          <select id="c-site" className="select" value={form.location_id} onChange={(e) => setForm({ ...form, location_id: e.target.value })}>
+            {locations.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="c-loc">Position</label>
+          <input id="c-loc" className="input" value={form.location} maxLength={160} placeholder="Front door, facing street" onChange={(e) => setForm({ ...form, location: e.target.value })} />
         </div>
         <div className="field">
           <label htmlFor="c-type">Camera type</label>
@@ -422,12 +486,37 @@ function CamerasSection({ editable, fileSourcesAllowed, testVideoDir }: { editab
             />
             <span className="field-hint">{sourceHint[form.source_type]}</span>
             {editing && <span className="field-hint">Current: {editing.source_description}. Stored encrypted and never shown in full.</span>}
+            <div className="control-row" style={{ marginTop: 4 }}>
+              <button type="button" className="btn btn-sm" onClick={runTest} disabled={testing || (!form.source.trim() && !editing)}>
+                {testing ? 'Testing…' : 'Test connection'}
+              </button>
+            </div>
+            {test && (
+              <div className={`banner ${test.ok ? 'banner-info' : 'banner-err'}`} role="status" style={{ marginBottom: 0 }}>
+                <div>
+                  <strong>{test.message}</strong>
+                  {test.steps.length > 1 && (
+                    <ul className="small" style={{ paddingLeft: 16, marginTop: 4 }}>
+                      {test.steps.map((st) => (
+                        <li key={st.step}>
+                          {st.ok ? '✓' : '✗'} {st.message}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
         {form.source_type === 'browser' && <p className="field-hint">{sourceHint.browser}</p>}
         <label className="control-row">
-          <input type="checkbox" checked={form.detection_enabled} onChange={(e) => setForm({ ...form, detection_enabled: e.target.checked })} /> Detect people and record entries/exits
+          <input type="checkbox" checked={form.detection_enabled} onChange={(e) => setForm({ ...form, detection_enabled: e.target.checked })} /> Detect people (needed for counting and zones)
         </label>
+        <label className="control-row">
+          <input type="checkbox" checked={form.counting_enabled} onChange={(e) => setForm({ ...form, counting_enabled: e.target.checked })} /> Count entries and exits at this camera&apos;s line
+        </label>
+        <p className="field-hint">Use one counting camera per doorway; overlapping cameras on the same door double-count. Turn counting off for zone-only cameras.</p>
         {editing && (
           <label className="control-row">
             <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> Camera enabled
@@ -449,7 +538,7 @@ function OperatorsSection() {
   const [users, setUsers] = useState<User[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ username: '', password: '', role: 'operator' });
+  const [form, setForm] = useState({ username: '', password: '', role: 'operator', email: '' });
   const [resetFor, setResetFor] = useState<User | null>(null);
   const [newPassword, setNewPassword] = useState('');
 
@@ -476,7 +565,7 @@ function OperatorsSection() {
   };
 
   return (
-    <Section id="operators" title="Operator accounts">
+    <Section id="operators" title="User accounts">
       {error && (
         <div className="banner banner-err" role="alert">
           {error}
@@ -508,6 +597,7 @@ function OperatorsSection() {
                     aria-label={`Role for ${u.username}`}
                     onChange={(e) => call(() => api(`/users/${u.id}`, { method: 'PATCH', body: { role: e.target.value } }))}
                   >
+                    <option value="viewer">Viewer</option>
                     <option value="operator">Operator</option>
                     <option value="admin">Administrator</option>
                   </select>
@@ -530,7 +620,7 @@ function OperatorsSection() {
         </table>
       </div>
       <div className="form-actions">
-        <button type="button" className="btn" onClick={() => { setForm({ username: '', password: '', role: 'operator' }); setOpen(true); }}>
+        <button type="button" className="btn" onClick={() => { setForm({ username: '', password: '', role: 'operator', email: '' }); setOpen(true); }}>
           <Plus size={14} /> Add operator
         </button>
       </div>
@@ -544,7 +634,7 @@ function OperatorsSection() {
             <button type="button" className="btn" onClick={() => setOpen(false)}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!form.username || form.password.length < 10} onClick={() => call(() => api('/users', { method: 'POST', body: form }), () => setOpen(false))}>
+            <button type="button" className="btn btn-primary" disabled={!form.username || form.password.length < 10} onClick={() => call(() => api('/users', { method: 'POST', body: { ...form, email: form.email.trim() || null } }), () => setOpen(false))}>
               Create account
             </button>
           </>
@@ -562,9 +652,14 @@ function OperatorsSection() {
         <div className="field">
           <label htmlFor="u-role">Role</label>
           <select id="u-role" className="select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
-            <option value="operator">Operator: monitor cameras, review events, reconcile occupancy</option>
+            <option value="viewer">Viewer: dashboards and reports only (no video or images)</option>
+            <option value="operator">Operator: monitor cameras, review events and alerts, reconcile occupancy</option>
             <option value="admin">Administrator: also settings, cameras and accounts</option>
           </select>
+        </div>
+        <div className="field">
+          <label htmlFor="u-email">Email (optional)</label>
+          <input id="u-email" className="input" type="email" autoComplete="off" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
         </div>
         {error && <div className="banner banner-err" style={{ marginBottom: 0 }}>{error}</div>}
       </Dialog>
@@ -602,6 +697,7 @@ function IntegrationsSection() {
   const { settings } = useSystem();
   if (!settings) return null;
   const { person_detector: pd, anomaly, storage } = settings.system;
+  if (!anomaly || !storage) return null;
   const anomalyOk = anomaly.status === 'ready';
   return (
     <Section id="integrations" title="Integrations">
@@ -614,10 +710,10 @@ function IntegrationsSection() {
         />
         <IntegrationRow
           ok={anomalyOk}
-          warn={anomaly.status === 'placeholder' || anomaly.status === 'disabled'}
-          title={`Anomaly detection (${anomaly.model_name ?? 'existing model'})`}
-          status={{ disabled: 'Disabled', placeholder: 'Model not connected', ready: 'Connected', error: 'Error', not_initialized: 'Not started' }[anomaly.status] ?? anomaly.status}
-          text={`${anomaly.message ?? ''} Connection point: ${anomaly.connection_point ?? 'backend/vision/anomaly.py'}.`}
+          warn={anomaly.status === 'motion' || anomaly.status === 'disabled' || anomaly.status === 'placeholder'}
+          title="Video anomaly detection"
+          status={{ disabled: 'Disabled', placeholder: 'No model', ready: 'Classifier active', motion: 'Motion detector active', error: 'Error', not_initialized: 'Not started' }[anomaly.status] ?? anomaly.status}
+          text={anomaly.status === 'disabled' ? 'Turn on with ANOMALY_DETECTION_ENABLED=True.' : 'See Video anomaly detection above for details.'}
         />
         <IntegrationRow
           ok={!storage.low}

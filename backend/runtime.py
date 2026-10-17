@@ -13,6 +13,9 @@ class Runtime:
     cameras: Optional[CameraManager] = None
     anomaly: Optional[AnomalyDetectorAdapter] = None
     retention: Optional[RetentionScheduler] = None
+    notifications = None  # services.notifications.NotificationDispatcher
+    alert_engine = None  # services.alert_engine.AlertEngine
+    sync = None  # services.sync.SyncPusher (edge mode)
 
 
 runtime = Runtime()

@@ -12,6 +12,7 @@ from models.schemas import LinkExitRequest, VisitUpdate
 from services.audit import audit_trail, record_audit
 from services.events import LinkError, link_exit_to_visit, serialize_event, serialize_visit
 from services.site_settings import get_site_settings, local_day_bounds
+from services.tenancy import get_owned
 
 router = APIRouter(prefix="/visits", tags=["visits"])
 
@@ -22,13 +23,16 @@ def list_visits(
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     q: Optional[str] = Query(None, max_length=64),
+    location_id: Optional[int] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: User = Depends(require_operator),
+    user: User = Depends(require_operator),
 ):
-    row = get_site_settings(db)
-    stmt = select(Visit)
+    row = get_site_settings(db, user.organization_id)
+    stmt = select(Visit).where(Visit.organization_id == user.organization_id)
+    if location_id is not None:
+        stmt = stmt.where(Visit.location_id == location_id)
     if status:
         stmt = stmt.where(Visit.status == status)
     if date_from:
@@ -36,34 +40,32 @@ def list_visits(
     if date_to:
         stmt = stmt.where(Visit.entry_at < local_day_bounds(row, date_to)[1])
     if q:
-        stmt = stmt.where(Visit.person_label.ilike(f"%{q.strip()}%"))
+        escaped = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(Visit.person_label.ilike(f"%{escaped}%", escape="\\"))
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = db.scalars(stmt.order_by(Visit.entry_at.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     return {"items": [serialize_visit(v) for v in rows], "total": total, "page": page, "page_size": page_size}
 
 
-def _get_visit(db: Session, visit_id: int) -> Visit:
-    visit = db.get(Visit, visit_id)
-    if visit is None:
-        raise HTTPException(status_code=404, detail="Visit not found.")
-    return visit
+def _get_visit(db: Session, visit_id: int, user: User) -> Visit:
+    return get_owned(db, Visit, visit_id, user, "Visit not found.")
 
 
 @router.get("/{visit_id}")
-def get_visit(visit_id: int, db: Session = Depends(get_db), _: User = Depends(require_operator)):
-    visit = _get_visit(db, visit_id)
+def get_visit(visit_id: int, db: Session = Depends(get_db), user: User = Depends(require_operator)):
+    visit = _get_visit(db, visit_id, user)
     data = serialize_visit(visit)
     data["events"] = [
         serialize_event(e, db)
         for e in db.scalars(select(DetectionEvent).where(DetectionEvent.visit_id == visit.id).order_by(DetectionEvent.occurred_at))
     ]
-    data["audit"] = audit_trail(db, "visit", visit.id)
+    data["audit"] = audit_trail(db, user.organization_id, "visit", visit.id)
     return data
 
 
 @router.patch("/{visit_id}")
 def update_visit(visit_id: int, body: VisitUpdate, db: Session = Depends(get_db), user: User = Depends(require_operator)):
-    visit = _get_visit(db, visit_id)
+    visit = _get_visit(db, visit_id, user)
     if visit.status in ("exited", "voided") and body.status is not None:
         raise HTTPException(status_code=409, detail="Closed or voided visits cannot change status.")
     changes = {}
@@ -87,10 +89,8 @@ def update_visit(visit_id: int, body: VisitUpdate, db: Session = Depends(get_db)
 
 @router.post("/{visit_id}/link-exit")
 def link_exit(visit_id: int, body: LinkExitRequest, db: Session = Depends(get_db), user: User = Depends(require_operator)):
-    visit = _get_visit(db, visit_id)
-    event = db.get(DetectionEvent, body.event_id)
-    if event is None:
-        raise HTTPException(status_code=404, detail="Exit event not found.")
+    visit = _get_visit(db, visit_id, user)
+    event = get_owned(db, DetectionEvent, body.event_id, user, "Exit event not found.")
     try:
         link_exit_to_visit(db, visit, event, user)
     except LinkError as exc:

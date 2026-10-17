@@ -23,7 +23,6 @@ const nextConfig: NextConfig = {
   async redirects() {
     // Earlier pages of this project.
     return [
-      { source: "/alerts", destination: "/overview", permanent: false },
       { source: "/monitoring", destination: "/live", permanent: false },
     ];
   },

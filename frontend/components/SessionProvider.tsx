@@ -8,6 +8,8 @@ import type { User } from '@/lib/types';
 interface SessionValue {
   user: User;
   isAdmin: boolean;
+  /** Administrators and operators: live video, evidence, review. Viewers see dashboards and reports. */
+  isOperator: boolean;
   signOut: () => Promise<void>;
 }
 
@@ -76,6 +78,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     );
   }
   return (
-    <SessionContext.Provider value={{ user, isAdmin: user.role === 'admin', signOut }}>{children}</SessionContext.Provider>
+    <SessionContext.Provider value={{ user, isAdmin: user.role === 'admin', isOperator: user.role === 'admin' || user.role === 'operator', signOut }}>{children}</SessionContext.Provider>
   );
 }

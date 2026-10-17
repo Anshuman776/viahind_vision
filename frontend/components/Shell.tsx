@@ -3,27 +3,40 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Building2, Camera as CameraIcon, LayoutDashboard, LogOut, ScrollText, Settings, ShieldCheck, Video, Wifi, WifiOff } from 'lucide-react';
+import { BarChart3, Bell, Images, LayoutDashboard, LogOut, ScanEye, ScrollText, Settings, Video, Wifi, WifiOff } from 'lucide-react';
 import { useSession } from './SessionProvider';
 import { useSystem } from './SystemProvider';
 import { formatDate, formatTime } from '@/lib/format';
 
-const NAV = [
+interface NavItem {
+  href: string;
+  label: string;
+  icon: typeof LayoutDashboard;
+  operatorOnly?: boolean;
+  badge?: 'alerts';
+}
+
+const NAV: NavItem[] = [
   { href: '/overview', label: 'Overview', icon: LayoutDashboard },
-  { href: '/live', label: 'Live Camera', icon: Video },
-  { href: '/logs', label: 'Entry & Exit Logs', icon: ScrollText },
+  { href: '/live', label: 'Live Cameras', icon: Video, operatorOnly: true },
+  { href: '/alerts', label: 'Alerts', icon: Bell, operatorOnly: true, badge: 'alerts' },
+  { href: '/logs', label: 'Entry & Exit Logs', icon: ScrollText, operatorOnly: true },
+  { href: '/evidence', label: 'Event Evidence', icon: Images, operatorOnly: true },
+  { href: '/reports', label: 'Reports', icon: BarChart3 },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];
+
+export const PRODUCT_TAGLINE = 'AI CCTV Business Intelligence';
 
 function Brand() {
   return (
     <div className="brand">
       <div className="brand-mark" aria-hidden="true">
-        <ShieldCheck size={18} />
+        <ScanEye size={18} />
       </div>
       <div>
         <div className="brand-name">VIAHIND Vision</div>
-        <div className="brand-sub">PG Surveillance System</div>
+        <div className="brand-sub">{PRODUCT_TAGLINE}</div>
       </div>
     </div>
   );
@@ -38,29 +51,62 @@ function Clock({ timezone }: { timezone: string }) {
   }, []);
   if (!now) return null;
   return (
-    <span className="meta-item" title={`Site time (${timezone})`}>
+    <span className="meta-item" title={`Business time (${timezone})`}>
       <span className="hide-md">{formatDate(now, timezone)}</span>
       <span className="mono">{formatTime(now, timezone)}</span>
     </span>
   );
 }
 
+export function LocationSwitcher({ compact = false }: { compact?: boolean }) {
+  const { locations, locationId, selectLocation } = useSystem();
+  if (locations.length < 2) return null;
+  return (
+    <span className="meta-item">
+      <label className="sr-only" htmlFor={compact ? 'loc-switch-m' : 'loc-switch'}>
+        Location
+      </label>
+      <select
+        id={compact ? 'loc-switch-m' : 'loc-switch'}
+        className="select select-sm"
+        value={locationId ?? ''}
+        onChange={(e) => selectLocation(e.target.value ? Number(e.target.value) : null)}
+      >
+        <option value="">All locations</option>
+        {locations
+          .filter((l) => l.is_active)
+          .map((l) => (
+            <option key={l.id} value={l.id}>
+              {l.name}
+            </option>
+          ))}
+      </select>
+    </span>
+  );
+}
+
 export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { user, signOut } = useSession();
-  const { settings, timezone, cameras, selectedCameraId, connected } = useSystem();
-  const selected = cameras.find((c) => c.id === selectedCameraId);
+  const { user, isOperator, signOut } = useSession();
+  const { settings, timezone, cameras, connected, newAlerts } = useSystem();
   const live = cameras.filter((c) => c.runtime.status === 'live').length;
+  const nav = NAV.filter((n) => isOperator || !n.operatorOnly);
+  const orgName = user.organization?.name ?? settings?.site.site_name;
 
   return (
     <div className="shell">
       <aside className="sidebar" aria-label="Main navigation">
         <Brand />
         <nav className="nav">
-          {NAV.map(({ href, label, icon: Icon }) => (
+          {nav.map(({ href, label, icon: Icon, badge }) => (
             <Link key={href} href={href} className="nav-link" aria-current={pathname === href ? 'page' : undefined}>
               <Icon size={17} aria-hidden="true" />
               {label}
+              {badge === 'alerts' && newAlerts > 0 && (
+                <span className="nav-count" aria-label={`${newAlerts} new alerts`}>
+                  {newAlerts > 99 ? '99+' : newAlerts}
+                </span>
+              )}
             </Link>
           ))}
         </nav>
@@ -78,32 +124,21 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <div className="main">
         <header className="topbar">
           <div className="topbar-title">
-            <span className="t1">VIAHIND Vision</span>
-            <span className="t2">PG Surveillance System</span>
+            <span className="t1">{orgName || 'VIAHIND Vision'}</span>
+            <span className="t2">{PRODUCT_TAGLINE}</span>
           </div>
           <div className="topbar-meta">
-            {settings && (
-              <span className="meta-item hide-md" title="Site">
-                <Building2 size={15} aria-hidden="true" />
-                {settings.site.site_name}
-              </span>
-            )}
-            {selected && (
-              <span className="meta-item hide-md" title="Selected camera">
-                <CameraIcon size={15} aria-hidden="true" />
-                {selected.name}
-              </span>
-            )}
+            <LocationSwitcher />
             <span className="meta-sep" aria-hidden="true" />
             <Clock timezone={timezone} />
             <span className="meta-sep" aria-hidden="true" />
             {connected ? (
-              <span className="badge badge-ok" title={`${live} of ${cameras.length} camera(s) live`}>
+              <span className="badge badge-ok" title={`Real-time updates connected · ${live} of ${cameras.length} camera(s) live`}>
                 <Wifi size={13} aria-hidden="true" />
-                Connected
+                Real-time
               </span>
             ) : (
-              <span className="badge badge-err" title="The real-time connection to the server is down; retrying.">
+              <span className="badge badge-err" title="The real-time connection to the server is down; figures may be delayed. Retrying.">
                 <WifiOff size={13} aria-hidden="true" />
                 Offline
               </span>
@@ -111,10 +146,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
         <nav className="mobile-nav" aria-label="Sections">
-          {NAV.map(({ href, label, icon: Icon }) => (
+          {nav.map(({ href, label, icon: Icon, badge }) => (
             <Link key={href} href={href} aria-current={pathname === href ? 'page' : undefined}>
               <Icon size={15} aria-hidden="true" />
               {label}
+              {badge === 'alerts' && newAlerts > 0 && <span className="nav-count">{newAlerts}</span>}
             </Link>
           ))}
           <button type="button" className="btn btn-ghost btn-sm" onClick={signOut} style={{ marginLeft: 'auto', alignSelf: 'center' }}>

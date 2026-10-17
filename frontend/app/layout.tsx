@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'VIAHIND Vision — PG Surveillance System',
-  description: 'Entrance camera monitoring, entry and exit logs, and occupancy for PG accommodation.',
+  title: 'VIAHIND Vision — AI CCTV Business Intelligence',
+  description: 'Footfall, occupancy, reviewable alerts and reports from your existing CCTV cameras.',
   robots: { index: false, follow: false },
 };
 

@@ -22,9 +22,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from config import settings
 from db import session_scope, utcnow
 from models.entities import Camera, DetectionEvent, PersonTrack, User, Visit
 from services.audit import record_audit
+from services.evidence import evidence_policy
 from services.site_settings import allocate_person_label
 from services.snapshots import delete_snapshot, save_snapshot
 from vision.line_crossing import CrossingEvent
@@ -43,6 +45,7 @@ class PendingEvent:
     event_id: str
     snapshot_path: Optional[str]
     snapshot_status: str
+    organization_id: Optional[int] = None
     attempts: int = 0
 
 
@@ -63,16 +66,34 @@ class EventRecorder:
         self._thread: Optional[threading.Thread] = None
 
     # -- worker-facing API ----------------------------------------------------------------
-    def record(self, camera_id: str, session_id: str, crossing: CrossingEvent, snapshot_jpeg: Optional[bytes]) -> Optional[dict]:
+    def record(
+        self,
+        camera_id: str,
+        session_id: str,
+        crossing: CrossingEvent,
+        snapshot_jpeg: Optional[bytes],
+        organization_id: Optional[int] = None,
+    ) -> Optional[dict]:
         event_id = str(uuid.uuid4())
         occurred = datetime.fromtimestamp(crossing.occurred_at, tz=timezone.utc)
-        rel, snap_status = save_snapshot(event_id, occurred, snapshot_jpeg)
-        pending = PendingEvent(camera_id, session_id, crossing, event_id, rel, snap_status)
+        if organization_id is None:
+            organization_id = _camera_organization(camera_id)
+        limit = evidence_policy(organization_id).storage_limit_mb if organization_id is not None else 0
+        rel, snap_status = save_snapshot(event_id, occurred, snapshot_jpeg, organization_id, limit)
+        pending = PendingEvent(camera_id, session_id, crossing, event_id, rel, snap_status, organization_id)
         return self._try_persist(pending)
 
     def pending_count(self) -> int:
         with self._pending_lock:
             return len(self._pending)
+
+    def pending_by_organization(self) -> dict:
+        with self._pending_lock:
+            counts: dict = {}
+            for item in self._pending:
+                if item.organization_id is not None:
+                    counts[item.organization_id] = counts.get(item.organization_id, 0) + 1
+            return counts
 
     def start_retry_loop(self, interval: float = 5.0) -> None:
         self._stop.clear()
@@ -104,6 +125,10 @@ class EventRecorder:
         try:
             with _record_lock, session_scope() as db:
                 payload = persist_crossing(db, item)
+        except CameraGone:
+            logger.warning("Event %s dropped: its camera no longer exists", item.event_id)
+            delete_snapshot(item.snapshot_path)
+            return None
         except SQLAlchemyError as exc:
             item.attempts += 1
             self.last_db_error = type(exc).__name__
@@ -128,9 +153,25 @@ class EventRecorder:
         return payload
 
 
+def _camera_organization(camera_id: str) -> Optional[int]:
+    try:
+        with session_scope() as db:
+            return db.scalar(select(Camera.organization_id).where(Camera.id == camera_id))
+    except SQLAlchemyError:
+        return None
+
+
+class CameraGone(RuntimeError):
+    """The camera was deleted before its event could be stored."""
+
+
 def persist_crossing(db: Session, item: PendingEvent) -> dict:
     crossing = item.crossing
     occurred = datetime.fromtimestamp(crossing.occurred_at, tz=timezone.utc)
+    cam = db.get(Camera, item.camera_id)
+    if cam is None:
+        raise CameraGone(item.camera_id)
+    org_id = cam.organization_id
 
     track = db.scalar(
         select(PersonTrack).where(
@@ -141,10 +182,11 @@ def persist_crossing(db: Session, item: PendingEvent) -> dict:
     )
     if track is None:
         track = PersonTrack(
+            organization_id=org_id,
             camera_id=item.camera_id,
             session_id=item.session_id,
             tracker_id=crossing.track_id,
-            person_label=allocate_person_label(db),
+            person_label=allocate_person_label(db, org_id),
             first_seen_at=occurred,
             last_seen_at=occurred,
         )
@@ -155,6 +197,8 @@ def persist_crossing(db: Session, item: PendingEvent) -> dict:
 
     event = DetectionEvent(
         id=item.event_id,
+        organization_id=org_id,
+        location_id=cam.location_id,
         camera_id=item.camera_id,
         occurred_at=occurred,
         event_type=crossing.event_type,
@@ -188,11 +232,14 @@ def persist_crossing(db: Session, item: PendingEvent) -> dict:
         else:
             event.match_status = "unmatched"
     db.flush()
+    enqueue_event_sync(db, event)
     return serialize_event(event, db)
 
 
 def _open_visit(db: Session, event: DetectionEvent, match_method: Optional[str]) -> Visit:
     visit = Visit(
+        organization_id=event.organization_id,
+        location_id=event.location_id,
         person_label=event.person_label,
         entry_event_id=event.id,
         entry_at=event.occurred_at,
@@ -288,6 +335,7 @@ def update_event(
     after = {"event_type": event.event_type, "review_status": event.review_status, "notes": event.notes, "visit_id": event.visit_id}
     if before != after:
         record_audit(db, user, "event.update", "event", event.id, {"before": before, "after": after})
+        enqueue_event_sync(db, event)
     return event
 
 
@@ -335,8 +383,12 @@ def serialize_event(event: DetectionEvent, db: Optional[Session] = None, camera_
     if camera_name is None and event.camera_id:
         cam = event.camera if event.camera is not None else (db.get(Camera, event.camera_id) if db else None)
         camera_name = cam.name if cam else event.camera_id
+    if camera_name is None:
+        camera_name = event.source_camera_name
     return {
         "id": event.id,
+        "organization_id": event.organization_id,
+        "location_id": event.location_id,
         "camera_id": event.camera_id,
         "camera_name": camera_name,
         "occurred_at": event.occurred_at.isoformat(),
@@ -352,6 +404,7 @@ def serialize_event(event: DetectionEvent, db: Optional[Session] = None, camera_
         "uncertain_reason": event.uncertain_reason,
         "notes": event.notes,
         "is_demo": event.is_demo,
+        "source_node_id": event.source_node_id,
     }
 
 
@@ -359,6 +412,7 @@ def serialize_visit(visit: Visit) -> dict:
     reliable = visit.match_method in ("tracker", "manual") and visit.entry_at is not None and visit.exit_at is not None
     return {
         "id": visit.id,
+        "location_id": visit.location_id,
         "person_label": visit.person_label,
         "status": visit.status,
         "entry_event_id": visit.entry_event_id,
@@ -374,9 +428,23 @@ def serialize_visit(visit: Visit) -> dict:
     }
 
 
-def list_open_visits(db: Session, limit: int = 100) -> List[Visit]:
+def list_open_visits(db: Session, organization_id: int, limit: int = 100) -> List[Visit]:
     return list(
         db.scalars(
-            select(Visit).where(Visit.status.in_(("inside", "needs_review"))).order_by(Visit.entry_at.desc()).limit(limit)
+            select(Visit)
+            .where(Visit.organization_id == organization_id, Visit.status.in_(("inside", "needs_review")))
+            .order_by(Visit.entry_at.desc())
+            .limit(limit)
         ).all()
     )
+
+
+# -- hybrid sync ---------------------------------------------------------------------------
+
+def enqueue_event_sync(db: Session, event: DetectionEvent) -> None:
+    """Edge mode: queue the event (or its correction) for the cloud in the same transaction."""
+    if not settings.IS_EDGE:
+        return
+    from services.sync import enqueue_event
+
+    enqueue_event(db, event)

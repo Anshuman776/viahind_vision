@@ -15,12 +15,16 @@ interface Props {
   /** Line to draw instead of the saved one (while editing). */
   draftLine?: EntranceLine | null;
   draftPoints?: Point[];
+  /** Zone polygon being drawn. */
+  draftPolygon?: Point[];
   showOverlay?: boolean;
 }
 
+export const ZONE_COLORS = { restricted: '#e5484d', monitored: '#3e9bd6' } as const;
+
 const LINE_COLOR = '#f5b700';
 
-export function LiveFeed({ camera, timezone, onPick, draftLine, draftPoints, showOverlay = true }: Props) {
+export function LiveFeed({ camera, timezone, onPick, draftLine, draftPoints, draftPolygon, showOverlay = true }: Props) {
   const [frame, setFrame] = useState<LiveFrame | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const status = camera.runtime.status;
@@ -105,6 +109,44 @@ export function LiveFeed({ camera, timezone, onPick, draftLine, draftPoints, sho
                   </g>
                 );
               })}
+            {showOverlay &&
+              (frame?.zones ?? camera.zones.filter((z) => z.enabled).map((z) => ({ ...z, count: 0 }))).map((z) => (
+                <g key={z.id} pointerEvents="none">
+                  <polygon
+                    points={z.polygon.map(([x, y]) => `${x * width},${y * height}`).join(' ')}
+                    fill={ZONE_COLORS[z.kind]}
+                    fillOpacity={0.12}
+                    stroke={ZONE_COLORS[z.kind]}
+                    strokeWidth={Math.max(2, width / 500)}
+                    strokeDasharray={z.kind === 'monitored' ? `${width / 120} ${width / 200}` : undefined}
+                  />
+                  <text
+                    x={z.polygon[0][0] * width + 6}
+                    y={z.polygon[0][1] * height + height * 0.035}
+                    fontSize={height * 0.028}
+                    fill="#fff"
+                    stroke="#111"
+                    strokeWidth={height / 400}
+                    paintOrder="stroke"
+                  >
+                    {z.name}
+                    {showVideo && z.count > 0 ? ` · ${z.count}` : ''}
+                  </text>
+                </g>
+              ))}
+            {draftPolygon && draftPolygon.length > 0 && (
+              <g pointerEvents="none">
+                <polyline
+                  points={draftPolygon.map((p) => `${p.x * width},${p.y * height}`).join(' ') + (draftPolygon.length > 2 ? ` ${draftPolygon[0].x * width},${draftPolygon[0].y * height}` : '')}
+                  fill={draftPolygon.length > 2 ? 'rgba(245,183,0,0.15)' : 'none'}
+                  stroke={LINE_COLOR}
+                  strokeWidth={Math.max(2, width / 400)}
+                />
+                {draftPolygon.map((p, i) => (
+                  <circle key={i} cx={p.x * width} cy={p.y * height} r={Math.max(4, width / 200)} fill={LINE_COLOR} stroke="#111" strokeWidth={2} />
+                ))}
+              </g>
+            )}
             {line && <LineOverlay line={line} width={width} height={height} />}
             {draftPoints?.map((p, i) => (
               <circle key={i} cx={p.x * width} cy={p.y * height} r={Math.max(5, width / 160)} fill={LINE_COLOR} stroke="#111" strokeWidth={2} />

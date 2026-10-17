@@ -7,6 +7,7 @@ State-changing requests must also send the X-VV-CSRF header, which a cross-site 
 <img> cannot add.
 """
 
+import hashlib
 import threading
 import time
 from collections import defaultdict, deque
@@ -21,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from db import get_db, utcnow
-from models.entities import User
+from models.entities import Organization, User
 
 CSRF_HEADER = "x-vv-csrf"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -45,11 +46,17 @@ def validate_new_password(password: str) -> None:
         raise HTTPException(status_code=422, detail="Password must mix upper- and lower-case letters and digits.")
 
 
+def _credential_version(user: User) -> str:
+    """Changes whenever the password changes, so a reset signs out existing sessions."""
+    return hashlib.sha256(("session:" + user.password_hash).encode()).hexdigest()[:16]
+
+
 def create_session_token(user: User) -> str:
     now = utcnow()
     payload = {
         "sub": str(user.id),
         "role": user.role,
+        "cv": _credential_version(user),
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)).timestamp()),
     }
@@ -67,6 +74,12 @@ def _user_from_token(token: Optional[str], db: Session) -> Optional[User]:
     user = db.get(User, user_id)
     if user is None or not user.is_active:
         return None
+    # A role change or deactivation takes effect immediately: the token's role must still match.
+    if payload.get("role") != user.role or payload.get("cv") != _credential_version(user):
+        return None
+    org = db.get(Organization, user.organization_id)
+    if org is None or not org.is_active:
+        return None
     return user
 
 
@@ -79,8 +92,13 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
+def require_viewer(user: User = Depends(get_current_user)) -> User:
+    """Any signed-in role: dashboards, reports and aggregate figures."""
+    return user
+
+
 def require_operator(user: User = Depends(get_current_user)) -> User:
-    # Both roles may operate cameras and review events; the dependency documents intent.
+    """Monitoring, evidence, review and reconciliation (admins and operators, not viewers)."""
     if user.role not in ("admin", "operator"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Operator access required.")
     return user
@@ -154,12 +172,15 @@ login_throttle = LoginThrottle()
 
 
 def ensure_bootstrap_admin(db: Session) -> None:
-    """Create the first administrator from BOOTSTRAP_ADMIN_* when no users exist."""
+    """Create the first administrator (in the default organization) from BOOTSTRAP_ADMIN_* when no users exist."""
     if db.scalar(select(User.id).limit(1)) is not None:
         return
     username = settings.BOOTSTRAP_ADMIN_USERNAME.strip()
     password = settings.BOOTSTRAP_ADMIN_PASSWORD
     if not username or not password:
         return
-    db.add(User(username=username, password_hash=hash_password(password), role="admin"))
+    org_id = db.scalar(select(Organization.id).order_by(Organization.id).limit(1))
+    if org_id is None:
+        return
+    db.add(User(organization_id=org_id, username=username, password_hash=hash_password(password), role="admin"))
     db.commit()
